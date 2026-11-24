@@ -34,6 +34,13 @@ Plain PHP 8.2 + MySQL, no framework, no build step, no Composer.
   - Tap a price to change it. That teaches the product its price at the current shop.
   - Tick items as they go into the trolley, then **Finish shop**: enter the till-slip total and it is logged against the month's budget.
 - **Recipes.** Ingredients are products plus an amount in the product's unit (e.g. 800 g chicken, 0.5 kg rice, 3 eggs). The app works out cost per recipe and per serving using the cheapest known prices, plus nutrition per serving where products have it.
+- **Recipes** are the heart of it. Each one has ingredients (a product, an amount in its unit, and a note like "diced"), numbered steps with optional timers, prep and cook time, and how many portions a batch makes.
+  - **Servings scaler:** change the portions and every amount, the cost per portion and the packs to buy update.
+  - **Portion weights:** weigh the cooked batch and it tells you the grams for each container.
+  - **Cook mode:** step-by-step, full screen, with running timers that beep and vibrate, and the screen kept awake. It ends with "Put N portions in the fridge".
+  - **Add to list** puts the packs a scaled batch needs on the shopping list.
+- **Meals ready (fridge):** each cooked batch is tracked with its date. "Ate one" counts down, and batches turn orange at 3 days old and red at 4. The home screen shows how many meals are ready.
+- **Takeaways:** a weekly allowance (default R100). One tap logs a takeaway, and it never counts against the grocery budget.
 - **Plan.** Tap a day in the strip to see and edit its meals. The *Prep for this week* card adds up everything the week's recipes need, so you know what to cook on prep day.
 - Add recipes to days and meals with a number of servings. The week shows total cost against your weekly share of the budget.
   - **Shop for this week** replaces the plan items on the list with the packs the week needs, rounded up to whole packs.
@@ -44,9 +51,27 @@ Plain PHP 8.2 + MySQL, no framework, no build step, no Composer.
 
 Stored per 100 g / 100 ml, or per item for products with unit `each`. Fill it in from Open Food Facts using the button in the product editor (needs a barcode), or type it from the label. Products without nutrition are flagged on recipes rather than counted as zero.
 
+## Backups
+
+`tools/backup.php` is deployed to `~/kitchen-tools/`, outside public_html. It writes `~/kitchen-backups/kitchen-YYYYMMDD-HHMMSS.sql.gz` and keeps the newest 14.
+
+Set it up once in cPanel → **Cron Jobs**, for example daily at 02:15:
+
+```
+15 2 * * * /usr/local/bin/php /home1/tru645/kitchen-tools/backup.php >/dev/null 2>&1
+```
+
+(If `/usr/local/bin/php` isn't PHP 8.x on your host, use `/opt/alt/php82/usr/bin/php`.)
+
+**Restore:** phpMyAdmin → select the database → Import → choose the `.sql.gz`. Or over SSH: `gunzip < file.sql.gz | mysql -u USER -p DATABASE`.
+
+## Database changes
+
+`app/schema.sql` is version 1. Later changes live in `app/migrations.php`, and they run automatically on the next page load after a deploy. Each one runs once, in order, and the version is recorded in `settings.schema_version`. To change the database, add a new numbered entry. Never edit one that has shipped.
+
 ## Updating
 
-Replace all files **except** `app/config.php`. Your data lives in MySQL, so nothing else needs to be kept.
+Merge to `main`, then in cPanel → Git Version Control → Manage → Pull or Deploy: **Update from Remote**, then **Deploy HEAD Commit**. `app/config.php` is never touched.
 
 ## Files
 
@@ -55,7 +80,9 @@ index.php            login + app shell
 api.php              JSON API (all actions are POST with a CSRF header)
 setup.php            one-time installer. Delete after use
 app/bootstrap.php    DB, sessions, remember-me, helpers
-app/schema.sql       tables
+app/schema.sql       tables (version 1)
+app/migrations.php   numbered schema changes, applied automatically
+tools/backup.php     nightly backup (CLI only, deployed outside public_html)
 app/config.php       your DB details (not in the zip)
 assets/app.js        the whole front end (vanilla JS)
 assets/app.css       styles ("Night kitchen" dark theme)
