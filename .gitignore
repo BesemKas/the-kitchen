@@ -1,0 +1,4 @@
+app/config.php
+error_log
+*.zip
+.DS_Store
