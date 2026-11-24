@@ -40,6 +40,8 @@ Plain PHP 8.2 + MySQL, no framework, no build step, no Composer.
   - **Cook mode:** step-by-step, full screen, with running timers that beep and vibrate, and the screen kept awake. It ends with "Put N portions in the fridge".
   - **Add to list** puts the packs a scaled batch needs on the shopping list.
 - **Meals ready (fridge):** each cooked batch is tracked with its date. "Ate one" counts down, and batches turn orange at 3 days old and red at 4. The home screen shows how many meals are ready.
+- **Prep day:** on the Plan tab, the app works out portions to cook as planned meals minus what's already in the fridge. *Start prep day* lets you adjust those numbers, then shows one combined gather list. It then runs cook mode for each recipe in turn, and every batch goes into the fridge.
+- **Eating:** tick a planned meal (on the Plan tab or under *Today* on the home screen). Its portions come out of the oldest fridge batch first, and ticking it again puts them back.
 - **Takeaways:** a weekly allowance (default R100). One tap logs a takeaway, and it never counts against the grocery budget.
 - **Plan.** Tap a day in the strip to see and edit its meals. The *Prep for this week* card adds up everything the week's recipes need, so you know what to cook on prep day.
 - Add recipes to days and meals with a number of servings. The week shows total cost against your weekly share of the budget.

@@ -325,3 +325,10 @@ body.auth { min-height: 100vh; display: grid; place-items: center; padding: 18px
 .sheet-body.full { min-height: 92vh; align-content: start; }
 .list > li.fridge-row { display: grid; gap: 6px; align-items: stretch; }
 .fridge-row .fr-top, .fridge-row .fr-bottom { display: flex; align-items: center; gap: 10px; }
+
+.eat-btn { width: 36px; height: 36px; flex: none; border-radius: 999px; border: 1.5px solid var(--line-2); background: transparent; color: var(--dim); font-weight: 700; cursor: pointer; }
+.eat-btn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.meal.eaten .strong { text-decoration: line-through; color: var(--dim); }
+.heading-row a { text-decoration: none; }
+
+.cap { text-transform: capitalize; }

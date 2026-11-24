@@ -44,6 +44,10 @@ const MIGRATIONS = [
         "ALTER TABLE trips ADD COLUMN kind VARCHAR(12) NOT NULL DEFAULT 'groceries', ADD INDEX (kind, trip_date)",
         "INSERT IGNORE INTO settings (k, v) VALUES ('takeaway_weekly', '100.00')",
     ],
+    3 => [
+        // a planned meal can be marked eaten; portions taken from the fridge are remembered so undo can put them back
+        "ALTER TABLE plan ADD COLUMN eaten_at DATETIME NULL, ADD COLUMN fridge_taken DECIMAL(6,2) NOT NULL DEFAULT 0",
+    ],
 ];
 
 function schema_version(): int

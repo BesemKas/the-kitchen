@@ -266,6 +266,36 @@ function takeaway_week(?string $date = null): array
     ];
 }
 
+function plan_entries(string $from, string $to): array
+{
+    $recipes = [];
+    foreach (recipes_with_costs() as $r) {
+        $recipes[$r['id']] = $r;
+    }
+    $rows = q("SELECT * FROM plan WHERE plan_date BETWEEN ? AND ? ORDER BY plan_date, FIELD(slot, 'breakfast', 'lunch', 'dinner', 'snack'), id", [$from, $to])->fetchAll();
+    $entries = [];
+    foreach ($rows as $r) {
+        $rec = $recipes[(int)$r['recipe_id']] ?? null;
+        if (!$rec) {
+            continue;
+        }
+        $s = (float)$r['servings'];
+        $entries[] = [
+            'id' => (int)$r['id'],
+            'date' => $r['plan_date'],
+            'slot' => $r['slot'],
+            'recipe_id' => $rec['id'],
+            'recipe' => $rec['name'],
+            'servings' => $s,
+            'eaten' => $r['eaten_at'] !== null,
+            'cost' => round($rec['cost_per_serving'] * $s, 2),
+            'energy_kj' => round((float)$rec['nutrition_per_serving']['energy_kj'] * $s),
+            'protein_g' => round((float)$rec['nutrition_per_serving']['protein_g'] * $s, 1),
+        ];
+    }
+    return $entries;
+}
+
 function fridge_list(): array
 {
     $rows = q('SELECT f.*, r.servings FROM fridge f LEFT JOIN recipes r ON r.id = f.recipe_id WHERE f.portions > 0 ORDER BY f.cooked_on, f.id')->fetchAll();
@@ -518,6 +548,7 @@ try {
                 'budget' => (float)setting('monthly_budget', '0'),
                 'takeaway' => takeaway_week(),
                 'fridge' => fridge_list(),
+                'today' => plan_entries(date('Y-m-d'), date('Y-m-d')),
                 'last_shop' => $lastShop ?: null,
             ]);
 
@@ -715,33 +746,47 @@ try {
 
         // ----- meal plan -----
         case 'plan.get':
-            $from = date_in($in, 'from');
-            $to = date_in($in, 'to');
-            $recipes = [];
-            foreach (recipes_with_costs() as $r) {
-                $recipes[$r['id']] = $r;
-            }
-            $rows = q('SELECT * FROM plan WHERE plan_date BETWEEN ? AND ? ORDER BY plan_date, FIELD(slot, \'breakfast\', \'lunch\', \'dinner\', \'snack\'), id', [$from, $to])->fetchAll();
-            $entries = [];
-            foreach ($rows as $r) {
-                $rec = $recipes[(int)$r['recipe_id']] ?? null;
-                if (!$rec) {
-                    continue;
+            out(['entries' => plan_entries(date_in($in, 'from'), date_in($in, 'to'))]);
+
+        case 'plan.eat':
+            // mark a planned meal eaten (or undo); takes its servings from the oldest fridge batches of that recipe
+            $id = int_in($in, 'id');
+            $p = q('SELECT * FROM plan WHERE id = ?', [$id])->fetch() ?: fail('Meal not found', 404);
+            db()->beginTransaction();
+            if (empty($in['undo'])) {
+                if ($p['eaten_at'] !== null) {
+                    db()->commit();
+                    out(['taken' => 0.0]);
                 }
-                $s = (float)$r['servings'];
-                $entries[] = [
-                    'id' => (int)$r['id'],
-                    'date' => $r['plan_date'],
-                    'slot' => $r['slot'],
-                    'recipe_id' => $rec['id'],
-                    'recipe' => $rec['name'],
-                    'servings' => $s,
-                    'cost' => round($rec['cost_per_serving'] * $s, 2),
-                    'energy_kj' => round((float)$rec['nutrition_per_serving']['energy_kj'] * $s),
-                    'protein_g' => round((float)$rec['nutrition_per_serving']['protein_g'] * $s, 1),
-                ];
+                $want = (float)$p['servings'];
+                $taken = 0.0;
+                foreach (q('SELECT id, portions FROM fridge WHERE recipe_id = ? AND portions > 0 ORDER BY cooked_on, id FOR UPDATE', [$p['recipe_id']])->fetchAll() as $b) {
+                    if ($taken >= $want) {
+                        break;
+                    }
+                    $take = min((float)$b['portions'], $want - $taken);
+                    q('UPDATE fridge SET portions = portions - ? WHERE id = ?', [$take, $b['id']]);
+                    $taken += $take;
+                }
+                q('DELETE FROM fridge WHERE portions <= 0');
+                q('UPDATE plan SET eaten_at = NOW(), fridge_taken = ? WHERE id = ?', [$taken, $id]);
+                db()->commit();
+                out(['taken' => $taken]);
             }
-            out(['entries' => $entries]);
+            $back = (float)$p['fridge_taken'];
+            if ($back > 0) {
+                $latest = q('SELECT id FROM fridge WHERE recipe_id = ? ORDER BY cooked_on DESC, id DESC LIMIT 1', [$p['recipe_id']])->fetchColumn();
+                if ($latest) {
+                    q('UPDATE fridge SET portions = portions + ? WHERE id = ?', [$back, $latest]);
+                } else {
+                    $rec = recipes_with_costs((int)$p['recipe_id'])[0] ?? null;
+                    q('INSERT INTO fridge (recipe_id, name, portions, cost_per_portion, cooked_on, user_id) VALUES (?, ?, ?, ?, CURDATE(), ?)',
+                        [$p['recipe_id'], $rec['name'] ?? 'Meal', $back, $rec && !$rec['missing_prices'] ? $rec['cost_per_serving'] : null, $uid]);
+                }
+            }
+            q('UPDATE plan SET eaten_at = NULL, fridge_taken = 0 WHERE id = ?', [$id]);
+            db()->commit();
+            out(['returned' => $back]);
 
         case 'plan.set':
             $slot = in_array($in['slot'] ?? '', SLOTS, true) ? $in['slot'] : fail('Bad slot');

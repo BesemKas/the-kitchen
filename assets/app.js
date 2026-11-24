@@ -172,7 +172,7 @@ function ringSvg(spent, list, budget) {
 }
 
 async function renderList() {
-  const [{ items, spent, budget, takeaway, fridge, last_shop: lastShop }] = await Promise.all([api('list.get'), S.products.length ? null : loadProducts()]);
+  const [{ items, spent, budget, takeaway, fridge, today: todayMeals, last_shop: lastShop }] = await Promise.all([api('list.get'), S.products.length ? null : loadProducts()]);
   S.takeawayWeekly = takeaway.weekly;
   S.spent = spent; S.budget = budget; updatePill();
 
@@ -213,6 +213,7 @@ async function renderList() {
     </section>
 
     ${homeCardsHtml(fridge, takeaway, lastShop)}
+    ${todayHtml(todayMeals, fridge)}
 
     <div class="chips" role="group" aria-label="Shop you're in">
       ${compare.map((c) => {
@@ -308,6 +309,8 @@ async function renderList() {
   };
 
   view.onclick = async (e) => {
+    const eat = e.target.closest('[data-eat]');
+    if (eat) { try { await eatMeal(eat.dataset.eat, eat.dataset.eaten === '1'); } catch (er) { fail(er); } return renderList(); }
     const home = e.target.closest('[data-home]');
     if (home) return home.dataset.home === 'fridge' ? fridgeSheet() : takeawaySheet();
     const chip = e.target.closest('[data-store]');
@@ -365,6 +368,25 @@ function homeCardsHtml(fridge, takeaway, lastShop) {
       </button>
     </div>
     ${days !== null && days > 7 ? `<p class="banner">No shop logged for ${days} days. Log your till slips so the budget stays honest.</p>` : ''}`;
+}
+
+function todayHtml(meals, fridge) {
+  if (!meals.length) return '';
+  const inFridge = {};
+  for (const f of fridge) if (f.recipe_id) inFridge[f.recipe_id] = (inFridge[f.recipe_id] || 0) + f.portions;
+  return `<section class="card stack">
+    <div class="heading-row"><h2>Today</h2><a href="#plan" class="small">Plan</a></div>
+    ${meals.map((m) => {
+      const have = inFridge[m.recipe_id] || 0;
+      const status = m.eaten ? '<span class="good-text">eaten</span>'
+        : have >= m.servings ? '<span class="good-text">ready in the fridge</span>'
+          : have > 0 ? `<span class="warn-text">only ${fmtQty(have)} in the fridge</span>` : '<span class="muted">not cooked yet</span>';
+      return `<div class="meal ${m.eaten ? 'eaten' : ''}">
+        <div class="grow"><div class="strong">${esc(m.recipe)}${m.servings !== 1 ? ` <span class="muted">×${fmtQty(m.servings)}</span>` : ''}</div><div class="small"><span class="muted cap">${esc(m.slot)}</span> · ${status}</div></div>
+        <button type="button" class="eat-btn ${m.eaten ? 'on' : ''}" data-eat="${m.id}" data-eaten="${m.eaten ? 1 : 0}" aria-pressed="${m.eaten}" aria-label="${m.eaten ? 'Undo eaten' : 'Mark eaten'}: ${esc(m.recipe)}">✓</button>
+      </div>`;
+    }).join('')}
+  </section>`;
 }
 
 const refreshHome = () => { if (location.hash === '' || location.hash === '#list') route(); };
@@ -861,10 +883,11 @@ function beep() {
   if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
 }
 
-function cookMode(r, portions) {
+function cookMode(r, portions, opts = {}) {
   const steps = recipeSteps(r);
   const sc = scaleRecipe(r, portions);
-  let idx = -1; // -1 = gather ingredients, steps.length = done
+  const first = opts.skipGather ? 0 : -1;
+  let idx = first; // -1 = gather ingredients, steps.length = done
   const timers = {}; // step index -> { end, left, running }
   const fmtClock = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
   let tick = null;
@@ -895,6 +918,7 @@ function cookMode(r, portions) {
     }
     const running = Object.entries(timers).filter(([i, t]) => t.running && Number(i) !== idx);
     openSheet(`${sheetHead(r.name)}
+      ${opts.label ? `<div class="small muted">${esc(opts.label)}</div>` : ''}
       ${running.length ? `<div class="timers">${running.map(([i, t]) => `<button class="pill" data-goto="${i}">Step ${Number(i) + 1} · <span class="num" data-clock="${i}">${fmtClock(t.end - Date.now())}</span></button>`).join('')}</div>` : ''}
       ${body}`, () => { clearInterval(tick); keepAwake(false); });
     sheetBody.classList.add('full');
@@ -908,7 +932,7 @@ function cookMode(r, portions) {
       const t = timers[idx];
       switch (a.dataset.act) {
         case 'next': idx = Math.min(steps.length, idx + 1); return draw();
-        case 'back': idx = Math.max(-1, idx - 1); return draw();
+        case 'back': idx = Math.max(first, idx - 1); return draw();
         case 'timer':
           if (!t) timers[idx] = { end: Date.now() + steps[idx].timer_minutes * 60000, running: true };
           else if (t.running) { t.left = t.end - Date.now(); t.running = false; }
@@ -921,7 +945,8 @@ function cookMode(r, portions) {
             await api('fridge.cook', { recipe_id: r.id, portions, grams_per_portion: g > 0 ? Math.round(g / portions) : null });
             closeSheet();
             toast(`${fmtQty(portions)} portions in the fridge`);
-            if (location.hash === '' || location.hash === '#list') route();
+            if (opts.onDone) opts.onDone();
+            else if (location.hash === '' || location.hash === '#list') route();
           } catch (er) { fail(er); }
           return;
         }
@@ -1084,9 +1109,10 @@ function fmtAmount(amount, unit) {
 async function renderPlan() {
   const start = parseIso(store.get('planWeek', iso(mondayOf(new Date()))));
   const end = addDays(start, 6);
-  const [{ entries }, { recipes }] = await Promise.all([
+  const [{ entries }, { recipes }, { fridge }] = await Promise.all([
     api('plan.get', { from: iso(start), to: iso(end) }),
     api('recipes.list'),
+    api('fridge.list'),
   ]);
   S.recipes = recipes;
   const today = iso(new Date());
@@ -1103,21 +1129,10 @@ async function renderPlan() {
   const selDate = parseIso(sel);
   const range = `${start.getDate()} ${start.toLocaleDateString('en-ZA', { month: 'short' })} – ${end.getDate()} ${end.toLocaleDateString('en-ZA', { month: 'short' })}`;
 
-  // what the week needs cooked, for prep day
+  // prep day: planned (not yet eaten) portions per recipe, minus what's already in the fridge
   const recipeById = Object.fromEntries(recipes.map((r) => [r.id, r]));
-  const need = {};
-  let portions = 0;
-  for (const e of entries) {
-    const r = recipeById[e.recipe_id];
-    if (!r) continue;
-    portions += e.servings;
-    for (const it of r.items) {
-      const k = it.product_id;
-      need[k] = need[k] || { name: it.name, unit: it.unit, amount: 0 };
-      need[k].amount += it.amount * e.servings / r.servings;
-    }
-  }
-  const needList = Object.values(need).sort((a, b) => b.amount - a.amount);
+  const prep = prepRows(entries, fridge, recipeById);
+  const toCook = prep.reduce((s, p) => s + p.cook, 0);
 
   view.innerHTML = `
     <div class="plan-head">
@@ -1154,9 +1169,9 @@ async function renderPlan() {
         <h2>${esc(selDate.toLocaleDateString('en-ZA', { weekday: 'long' }))}</h2>
         <span class="small muted">${dayEntries.length ? money(dayCost) : 'Nothing planned'}</span>
       </div>
-      ${dayEntries.map((e) => `<div class="meal">
-        <span class="t">${esc(e.slot)}</span>
-        <div class="grow"><div class="strong">${esc(e.recipe)}${e.servings !== 1 ? ` <span class="muted">×${fmtQty(e.servings)}</span>` : ''}</div>${e.protein_g ? `<div class="small muted">${Math.round(e.protein_g)} g protein</div>` : ''}</div>
+      ${dayEntries.map((e) => `<div class="meal ${e.eaten ? 'eaten' : ''}">
+        <button type="button" class="eat-btn ${e.eaten ? 'on' : ''}" data-eat="${e.id}" data-eaten="${e.eaten ? 1 : 0}" aria-pressed="${e.eaten}" aria-label="${e.eaten ? 'Undo eaten' : 'Mark eaten'}: ${esc(e.recipe)}">✓</button>
+        <div class="grow"><div class="strong">${esc(e.recipe)}${e.servings !== 1 ? ` <span class="muted">×${fmtQty(e.servings)}</span>` : ''}</div><div class="small muted"><span class="cap">${esc(e.slot)}</span>${e.protein_g ? ` · ${Math.round(e.protein_g)} g protein` : ''}</div></div>
         <span class="num strong">${money(e.cost)}</span>
         <button class="icon-btn" data-del="${e.id}" aria-label="Remove ${esc(e.recipe)}">✕</button>
       </div>`).join('')}
@@ -1164,11 +1179,12 @@ async function renderPlan() {
       <button class="btn small" data-add="${sel}">＋ Add a meal</button>
     </section>
 
-    ${needList.length ? `<section class="prep-card">
+    ${prep.length ? `<section class="prep-card">
       ${ICON_POT}
-      <div class="grow stack tight">
-        <span class="strong">Prep for this week</span>
-        <span class="small muted">${needList.map((n) => `${fmtAmount(n.amount, n.unit)} ${esc(n.name)}`).join(', ')}. Makes ${fmtQty(portions)} portion${portions === 1 ? '' : 's'}.</span>
+      <div class="grow stack">
+        <span class="strong">Prep day</span>
+        <div class="stack tight">${prep.map((p) => `<div class="row between small"><span>${esc(p.recipe.name)}</span><span class="muted">need ${fmtQty(p.planned)}${p.fridge ? ` · ${fmtQty(p.fridge)} in fridge` : ''} · <b class="${p.cook ? 'warn-text' : 'good-text'}">${p.cook ? `cook ${fmtQty(p.cook)}` : 'covered'}</b></span></div>`).join('')}</div>
+        ${toCook ? '<button class="btn small" data-act="prep">Start prep day</button>' : '<span class="small good-text">Everything planned is already in the fridge.</span>'}
       </div>
     </section>` : ''}
 
@@ -1177,9 +1193,11 @@ async function renderPlan() {
   view.querySelectorAll('.mark').forEach((m) => { m.style.width = `${Math.min(30, 6 + Number(m.dataset.n) * 6)}px`; });
 
   view.onclick = async (e) => {
-    const t = e.target.closest('[data-act],[data-add],[data-del],[data-day]');
+    const t = e.target.closest('[data-act],[data-add],[data-del],[data-day],[data-eat]');
     if (!t) return;
     try {
+      if (t.dataset.eat) { await eatMeal(t.dataset.eat, t.dataset.eaten === '1'); return renderPlan(); }
+      if (t.dataset.act === 'prep') return prepSession(prep.filter((p) => p.cook > 0), () => renderPlan());
       if (t.dataset.day) { store.set('planDay', t.dataset.day); return renderPlan(); }
       if (t.dataset.add) return planAddSheet(t.dataset.add);
       if (t.dataset.del) { await api('plan.delete', { id: t.dataset.del }); return renderPlan(); }
@@ -1205,6 +1223,82 @@ async function renderPlan() {
       renderPlan();
     } catch (er) { fail(er); }
   };
+}
+
+function prepRows(entries, fridge, recipeById) {
+  const by = {};
+  for (const e of entries) {
+    if (e.eaten || !recipeById[e.recipe_id]) continue;
+    by[e.recipe_id] = by[e.recipe_id] || { recipe: recipeById[e.recipe_id], planned: 0, fridge: 0 };
+    by[e.recipe_id].planned += e.servings;
+  }
+  for (const f of fridge) if (f.recipe_id && by[f.recipe_id]) by[f.recipe_id].fridge += f.portions;
+  return Object.values(by).map((p) => ({ ...p, cook: Math.max(0, Math.ceil(p.planned - p.fridge - 1e-9)) }))
+    .sort((a, b) => b.cook - a.cook);
+}
+
+async function eatMeal(id, undo) {
+  const r = await api('plan.eat', { id, undo });
+  if (undo) toast(r.returned ? `Put ${fmtQty(r.returned)} back in the fridge` : 'Marked not eaten');
+  else toast(r.taken ? `Took ${fmtQty(r.taken)} from the fridge` : 'Marked eaten (none were in the fridge)');
+}
+
+/** Prep day: choose portions per recipe, gather everything at once, then cook each recipe in turn. */
+function prepSession(rows, onFinish) {
+  const plan = rows.map((p) => ({ recipe: p.recipe, n: p.cook }));
+  const drawPick = () => {
+    const active = plan.filter((p) => p.n > 0);
+    const cost = active.reduce((s, p) => s + scaleRecipe(p.recipe, p.n).used, 0);
+    openSheet(`${sheetHead('Prep day')}
+      <p class="small muted">Portions to cook, after what's already in the fridge. Change them if you want extra.</p>
+      <ul class="list card flush">${plan.map((p, i) => `<li data-i="${i}">
+        <div class="grow"><div class="name">${esc(p.recipe.name)}</div><div class="sub">${money(p.recipe.cost_per_serving)} a portion${recipeSteps(p.recipe).length ? ` · ${recipeSteps(p.recipe).length} steps` : ''}</div></div>
+        <div class="qty"><button type="button" data-act="dec" aria-label="Fewer">−</button><span>${fmtQty(p.n)}</span><button type="button" data-act="inc" aria-label="More">+</button></div></li>`).join('')}</ul>
+      <div class="row between"><span class="muted">${fmtQty(active.reduce((s, p) => s + p.n, 0))} portions</span><b class="num">${money(cost)}</b></div>
+      <button class="btn primary block" data-act="gather" ${active.length ? '' : 'disabled'}>Gather everything</button>`);
+    sheetBody.onclick = (e) => {
+      const a = e.target.closest('[data-act]');
+      if (!a) return;
+      const li = a.closest('li');
+      if (a.dataset.act === 'inc') { plan[li.dataset.i].n += 1; return drawPick(); }
+      if (a.dataset.act === 'dec') { plan[li.dataset.i].n = Math.max(0, plan[li.dataset.i].n - 1); return drawPick(); }
+      if (a.dataset.act === 'gather') return drawGather(active);
+    };
+  };
+  const drawGather = (active) => {
+    const sum = {};
+    for (const p of active) {
+      for (const it of scaleRecipe(p.recipe, p.n).items) {
+        sum[it.product_id] = sum[it.product_id] || { name: it.name, unit: it.unit, amount: 0 };
+        sum[it.product_id].amount += it.amount;
+      }
+    }
+    openSheet(`${sheetHead('Gather everything')}
+      <p class="small muted">For ${active.map((p) => `${fmtQty(p.n)} × ${esc(p.recipe.name)}`).join(', ')}.</p>
+      <ul class="ing-list check">${Object.values(sum).sort((a, b) => a.name.localeCompare(b.name)).map((it) => `<li><label class="row grow"><input type="checkbox"><span class="amt num">${fmtAmount(it.amount, it.unit)}</span><span class="grow">${esc(it.name)}</span></label></li>`).join('')}</ul>
+      <button class="btn primary block" data-act="go">Cook ${esc(active[0].recipe.name)}</button>
+      <button class="btn block" data-act="back">Back</button>`);
+    sheetBody.classList.add('full');
+    sheetBody.onclick = (e) => {
+      const a = e.target.closest('[data-act]');
+      if (!a) return;
+      if (a.dataset.act === 'back') return drawPick();
+      if (a.dataset.act === 'go') { closeSheet(); cookNext(active, 0); }
+    };
+  };
+  const cookNext = (active, i) => {
+    if (i >= active.length) {
+      toast(`Prep done: ${fmtQty(active.reduce((s, p) => s + p.n, 0))} portions in the fridge`);
+      if (onFinish) onFinish();
+      return;
+    }
+    cookMode(active[i].recipe, active[i].n, {
+      skipGather: true,
+      label: `Recipe ${i + 1} of ${active.length}`,
+      onDone: () => cookNext(active, i + 1),
+    });
+  };
+  drawPick();
 }
 
 async function planAddSheet(date, recipeId = null) {
