@@ -48,6 +48,10 @@ const MIGRATIONS = [
         // a planned meal can be marked eaten; portions taken from the fridge are remembered so undo can put them back
         "ALTER TABLE plan ADD COLUMN eaten_at DATETIME NULL, ADD COLUMN fridge_taken DECIMAL(6,2) NOT NULL DEFAULT 0",
     ],
+    4 => [
+        // per-person daily targets, set by each person for themselves
+        "ALTER TABLE users ADD COLUMN protein_target_g INT UNSIGNED NULL, ADD COLUMN kj_target INT UNSIGNED NULL",
+    ],
 ];
 
 function schema_version(): int

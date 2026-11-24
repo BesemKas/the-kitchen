@@ -1146,6 +1146,8 @@ async function renderPlan() {
       </div>
     </div>
 
+    <button class="btn primary block" data-act="wizard">${entries.length ? 'Re-plan this week' : 'Plan my week'}</button>
+
     <div class="row between">
       <div class="week-nav">
         <button type="button" data-act="prev" aria-label="Previous week">‹</button>
@@ -1175,7 +1177,7 @@ async function renderPlan() {
         <span class="num strong">${money(e.cost)}</span>
         <button class="icon-btn" data-del="${e.id}" aria-label="Remove ${esc(e.recipe)}">✕</button>
       </div>`).join('')}
-      ${dayProtein ? `<div class="row between small"><span class="muted">Protein ${dayEntries.length > 1 ? 'today' : ''}</span><span class="strong">${Math.round(dayProtein)} g</span></div>` : ''}
+      ${dayProtein ? perPersonHtml(dayEntries) : ''}
       <button class="btn small" data-add="${sel}">＋ Add a meal</button>
     </section>
 
@@ -1191,6 +1193,7 @@ async function renderPlan() {
     <button class="btn primary block" data-act="to-list" ${entries.length ? '' : 'disabled'}>Put the week on my list</button>`;
 
   view.querySelectorAll('.mark').forEach((m) => { m.style.width = `${Math.min(30, 6 + Number(m.dataset.n) * 6)}px`; });
+  view.querySelectorAll('[data-w]').forEach((m) => { m.style.width = `${m.dataset.w}%`; });
 
   view.onclick = async (e) => {
     const t = e.target.closest('[data-act],[data-add],[data-del],[data-day],[data-eat]');
@@ -1198,6 +1201,7 @@ async function renderPlan() {
     try {
       if (t.dataset.eat) { await eatMeal(t.dataset.eat, t.dataset.eaten === '1'); return renderPlan(); }
       if (t.dataset.act === 'prep') return prepSession(prep.filter((p) => p.cook > 0), () => renderPlan());
+      if (t.dataset.act === 'wizard') return planWizard(start, recipes, entries);
       if (t.dataset.day) { store.set('planDay', t.dataset.day); return renderPlan(); }
       if (t.dataset.add) return planAddSheet(t.dataset.add);
       if (t.dataset.del) { await api('plan.delete', { id: t.dataset.del }); return renderPlan(); }
@@ -1223,6 +1227,110 @@ async function renderPlan() {
       renderPlan();
     } catch (er) { fail(er); }
   };
+}
+
+/** What one person eats on a day, assuming each planned serving is one person's portion. */
+function perPersonHtml(dayEntries) {
+  const people = Math.max(1, S.users.length);
+  const protein = dayEntries.reduce((s, e) => s + e.protein_g, 0) / people;
+  const kj = dayEntries.reduce((s, e) => s + e.energy_kj, 0) / people;
+  const me = S.users.find((u) => u.id === S.user.id) || {};
+  const bar = (v, t) => (t ? `<div class="meter ${v < t * 0.8 ? 'warn' : ''}"><div data-w="${Math.min(100, (v / t) * 100)}"></div></div>` : '');
+  return `<div class="stack tight small">
+      <div class="row between"><span class="muted">Each person${people > 1 ? ` (of ${people})` : ''}</span><span><b>${Math.round(protein)} g</b> protein · <b>${Math.round(kj).toLocaleString('en-ZA')}</b> kJ</span></div>
+      ${me.protein_target_g ? `<div class="row between"><span class="muted">Your protein target</span><span>${me.protein_target_g} g</span></div>${bar(protein, me.protein_target_g)}` : ''}
+      ${me.kj_target ? `<div class="row between"><span class="muted">Your kJ target</span><span>${me.kj_target.toLocaleString('en-ZA')} kJ</span></div>${bar(kj, me.kj_target)}` : ''}
+      ${!me.protein_target_g && !me.kj_target ? '<span class="muted">Set your daily targets on the Budget tab.</span>' : ''}
+    </div>`;
+}
+
+/** Plan my week: pick days, people and recipes per meal; the app spreads them out in prep-friendly runs. */
+function planWizard(start, recipes, existing) {
+  if (!recipes.length) { toast('Add a recipe first'); location.hash = '#recipes'; return; }
+  const days = [0, 1, 2, 3, 4, 5, 6].map((i) => iso(addDays(start, i)));
+  const saved = store.get('wizard', {});
+  const valid = (ids) => (ids || []).filter((id) => recipes.some((r) => r.id === id));
+  const st = {
+    days: saved.dayMask ? days.filter((_, i) => saved.dayMask[i]) : [...days],
+    people: saved.people || Math.max(1, S.users.length),
+    breakfast: valid([saved.breakfast])[0] || null,
+    lunch: valid(saved.lunch),
+    dinner: valid(saved.dinner),
+    batch: saved.batch || 2,
+    mode: existing.length ? 'fill' : 'replace',
+  };
+  const byId = Object.fromEntries(recipes.map((r) => [r.id, r]));
+  const build = () => {
+    const out = [];
+    const same = st.lunch.length > 1 && st.lunch.join() === st.dinner.join();
+    st.days.forEach((d, i) => {
+      const block = Math.floor(i / st.batch);
+      if (st.breakfast) out.push({ date: d, slot: 'breakfast', recipe_id: st.breakfast, servings: st.people });
+      if (st.lunch.length) out.push({ date: d, slot: 'lunch', recipe_id: st.lunch[block % st.lunch.length], servings: st.people });
+      if (st.dinner.length) out.push({ date: d, slot: 'dinner', recipe_id: st.dinner[(block + (same ? 1 : 0)) % st.dinner.length], servings: st.people });
+    });
+    return out;
+  };
+  const chips = (key) => recipes.map((r) => `<button type="button" class="chip ${st[key].includes(r.id) ? 'active' : ''}" data-pick="${key}" data-id="${r.id}" aria-pressed="${st[key].includes(r.id)}">${esc(r.name)}</button>`).join('');
+  const draw = () => {
+    const plan = build();
+    const cost = plan.reduce((s, e) => s + (byId[e.recipe_id].cost_per_serving * e.servings), 0);
+    const weekBudget = S.budget * 12 / 52;
+    const perDay = {};
+    for (const e of plan) {
+      const n = byId[e.recipe_id].nutrition_per_serving || {};
+      perDay[e.date] = (perDay[e.date] || 0) + (n.protein_g || 0);
+    }
+    const avgProtein = st.days.length ? Object.values(perDay).reduce((a, b) => a + b, 0) / st.days.length : 0;
+    const me = S.users.find((u) => u.id === S.user.id) || {};
+    const keepY = sheetBody.scrollTop;
+    openSheet(`${sheetHead('Plan my week')}
+      <div class="stack tight"><span class="small muted">Days</span>
+        <div class="daystrip">${days.map((d) => { const dt = parseIso(d); const on = st.days.includes(d); return `<button type="button" class="daybtn ${on ? 'active' : 'empty'}" data-day="${d}" aria-pressed="${on}"><span class="d">${'MTWTFSS'[(dt.getDay() + 6) % 7]}</span><b>${dt.getDate()}</b></button>`; }).join('')}</div>
+      </div>
+      <div class="row between"><span>People eating</span><div class="qty big"><button type="button" data-act="p-">−</button><span>${st.people}</span><button type="button" data-act="p+">+</button></div></div>
+      <label>Breakfast <select id="wzB"><option value="">Skip breakfast</option>${recipes.map((r) => `<option value="${r.id}" ${r.id === st.breakfast ? 'selected' : ''}>${esc(r.name)} (${money(r.cost_per_serving)})</option>`).join('')}</select></label>
+      <div class="stack tight"><span class="small muted">Lunch: pick one or more to rotate</span><div class="chips wrap">${chips('lunch')}</div></div>
+      <div class="stack tight"><span class="small muted">Dinner: pick one or more to rotate</span><div class="chips wrap">${chips('dinner')}</div></div>
+      <div class="row between"><span>Same recipe for</span><div class="qty big"><button type="button" data-act="b-">−</button><span>${st.batch}</span><button type="button" data-act="b+">+</button></div></div>
+      <p class="small muted">Runs of ${st.batch} day${st.batch > 1 ? 's' : ''} per recipe make prep easier: one batch covers several meals.</p>
+      ${existing.length ? `<div class="chips wrap"><button type="button" class="chip ${st.mode === 'fill' ? 'active' : ''}" data-mode="fill">Only fill empty meals</button><button type="button" class="chip ${st.mode === 'replace' ? 'active' : ''}" data-mode="replace">Replace this week's plan</button></div>` : ''}
+      <section class="card stack">
+        <div class="row between"><span>${plan.length} meals</span><b class="num ${cost > weekBudget ? 'bad-text' : 'good-text'}">${money(cost)}</b></div>
+        <div class="row between small muted"><span>Weekly share of budget</span><span class="num">${money(weekBudget)}</span></div>
+        ${cost > weekBudget ? `<p class="small bad-text">Over by ${money(cost - weekBudget)}. Swap in a cheaper recipe or plan fewer meals.</p>` : ''}
+        <div class="row between small"><span class="muted">Protein per person a day</span><span>${Math.round(avgProtein)} g${me.protein_target_g ? ` <span class="muted">/ ${me.protein_target_g} g target</span>` : ''}</span></div>
+        <div class="stack tight small">${st.days.map((d) => { const dt = parseIso(d); const ms = plan.filter((e) => e.date === d); return `<div class="row"><span class="muted wz-day">${dt.toLocaleDateString('en-ZA', { weekday: 'short' })}</span><span class="grow">${ms.map((e) => esc(byId[e.recipe_id].name)).join(' · ') || '<span class="muted">nothing</span>'}</span></div>`; }).join('')}</div>
+      </section>
+      <button class="btn primary block" data-act="save" ${plan.length ? '' : 'disabled'}>Save plan</button>`);
+    sheetBody.scrollTop = keepY;
+    const sel = document.getElementById('wzB');
+    sel.onchange = () => { st.breakfast = sel.value ? Number(sel.value) : null; draw(); };
+    sheetBody.onclick = async (e) => {
+      const t = e.target.closest('[data-act],[data-pick],[data-day],[data-mode]');
+      if (!t) return;
+      if (t.dataset.day) { const d = t.dataset.day; st.days = st.days.includes(d) ? st.days.filter((x) => x !== d) : days.filter((x) => x === d || st.days.includes(x)); return draw(); }
+      if (t.dataset.pick) { const k = t.dataset.pick; const id = Number(t.dataset.id); st[k] = st[k].includes(id) ? st[k].filter((x) => x !== id) : [...st[k], id]; return draw(); }
+      if (t.dataset.mode) { st.mode = t.dataset.mode; return draw(); }
+      switch (t.dataset.act) {
+        case 'p-': st.people = Math.max(1, st.people - 1); return draw();
+        case 'p+': st.people = Math.min(12, st.people + 1); return draw();
+        case 'b-': st.batch = Math.max(1, st.batch - 1); return draw();
+        case 'b+': st.batch = Math.min(7, st.batch + 1); return draw();
+        case 'save':
+          try {
+            store.set('wizard', { dayMask: days.map((d) => st.days.includes(d)), people: st.people, breakfast: st.breakfast, lunch: st.lunch, dinner: st.dinner, batch: st.batch });
+            const r = await api('plan.bulk', { entries: plan, mode: st.mode });
+            closeSheet();
+            toast(`${r.added} meal${r.added === 1 ? '' : 's'} planned. Next: put the week on your list`);
+            renderPlan();
+          } catch (er) { fail(er); }
+          return;
+        default:
+      }
+    };
+  };
+  draw();
 }
 
 function prepRows(entries, fridge, recipeById) {
@@ -1373,6 +1481,12 @@ async function renderBudget() {
     <section class="card stack">
       <h2>Settings</h2>
       <form class="row" id="budgetForm"><label class="grow">Monthly grocery budget (R) <input name="monthly_budget" type="number" inputmode="decimal" step="0.01" min="0" value="${b.budget}"></label><button class="btn">Save</button></form>
+      <form class="stack" id="targets"><span class="small muted">My daily targets (each of you sets your own)</span>
+        <div class="grid2">
+          <label>Protein (g) <input name="protein" type="number" inputmode="numeric" min="0" value="${(S.users.find((u) => u.id === S.user.id) || {}).protein_target_g ?? ''}"></label>
+          <label>Energy (kJ) <input name="kj" type="number" inputmode="numeric" min="0" value="${(S.users.find((u) => u.id === S.user.id) || {}).kj_target ?? ''}"></label>
+        </div>
+        <button class="btn">Save targets</button></form>
       <form class="row" id="taWeekly"><label class="grow">Weekly takeaway allowance (R) <input name="weekly" type="number" inputmode="decimal" step="0.01" min="0" value="${b.takeaway_weekly}"></label><button class="btn">Save</button></form>
       <div>
         <div class="small muted">Shops</div>
@@ -1390,6 +1504,11 @@ async function renderBudget() {
     e.preventDefault();
     try {
       if (e.target.id === 'budgetForm') { await api('budget.set', { monthly_budget: e.target.monthly_budget.value }); S.budget = Number(e.target.monthly_budget.value); toast('Budget saved'); }
+      if (e.target.id === 'targets') {
+        await api('account.targets', { protein_target_g: e.target.protein.value, kj_target: e.target.kj.value });
+        S.users = (await api('bootstrap')).users;
+        toast('Targets saved');
+      }
       if (e.target.id === 'taWeekly') { await api('takeaway.set', { weekly: e.target.weekly.value }); toast('Takeaway allowance saved'); }
       if (e.target.id === 'storeForm') { await api('stores.add', { name: e.target.name.value }); await refreshStores(); }
       renderBudget();
