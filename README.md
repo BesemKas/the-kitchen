@@ -41,6 +41,8 @@ Plain PHP 8.2 + MySQL, no framework, no build step, no Composer.
   - **Add to list** puts the packs a scaled batch needs on the shopping list.
 - **Meals ready (fridge):** each cooked batch is tracked with its date. "Ate one" counts down, and batches turn orange at 3 days old and red at 4. The home screen shows how many meals are ready.
 - **Prep day:** on the Plan tab, the app works out portions to cook as planned meals minus what's already in the fridge. *Start prep day* lets you adjust those numbers, then shows one combined gather list. It then runs cook mode for each recipe in turn, and every batch goes into the fridge.
+- **Plan my week:** pick the days, how many people are eating, a breakfast, and one or more recipes to rotate for lunch and dinner. The app spreads them out in runs of 2 days (adjustable) so one batch covers several meals. It shows the week's cost against your weekly share of the budget, and protein per person against your target, before you save. It can fill only empty meals or replace the week.
+- **Targets:** each of you sets a daily protein and kJ target on the Budget tab. The Plan tab shows each person's day against them.
 - **Eating:** tick a planned meal (on the Plan tab or under *Today* on the home screen). Its portions come out of the oldest fridge batch first, and ticking it again puts them back.
 - **Takeaways:** a weekly allowance (default R100). One tap logs a takeaway, and it never counts against the grocery budget.
 - **Plan.** Tap a day in the strip to see and edit its meals. The *Prep for this week* card adds up everything the week's recipes need, so you know what to cook on prep day.

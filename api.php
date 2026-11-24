@@ -423,7 +423,12 @@ try {
             $month = date('Y-m');
             out([
                 'user' => $user,
-                'users' => q('SELECT id, display_name FROM users ORDER BY id')->fetchAll(),
+                'users' => array_map(fn($u) => [
+                    'id' => (int)$u['id'],
+                    'display_name' => $u['display_name'],
+                    'protein_target_g' => $u['protein_target_g'] === null ? null : (int)$u['protein_target_g'],
+                    'kj_target' => $u['kj_target'] === null ? null : (int)$u['kj_target'],
+                ], q('SELECT id, display_name, protein_target_g, kj_target FROM users ORDER BY id')->fetchAll()),
                 'stores' => q('SELECT id, name FROM stores ORDER BY name')->fetchAll(),
                 'budget' => (float)setting('monthly_budget', '0'),
                 'spent' => month_spent($month),
@@ -803,6 +808,41 @@ try {
             q('DELETE FROM plan WHERE id = ?', [int_in($in, 'id')]);
             out(['ok' => true]);
 
+        case 'plan.bulk':
+            // add many planned meals at once (the week planner). mode 'fill' skips slots that already have a meal;
+            // 'replace' clears the uneaten meals in those slots first.
+            $mode = ($in['mode'] ?? 'fill') === 'replace' ? 'replace' : 'fill';
+            $entries = array_values((array)($in['entries'] ?? []));
+            if (count($entries) > 200) {
+                fail('Too many meals at once');
+            }
+            $clean = [];
+            foreach ($entries as $e) {
+                $e = (array)$e;
+                $slot = in_array($e['slot'] ?? '', SLOTS, true) ? $e['slot'] : fail('Bad slot');
+                $clean[] = [date_in($e, 'date'), $slot, int_in($e, 'recipe_id'), num_in($e, 'servings', 1, 0.25, 50)];
+            }
+            db()->beginTransaction();
+            $added = 0;
+            $slotsDone = [];
+            foreach ($clean as [$date, $slot, $rid, $servings]) {
+                $key = "$date|$slot";
+                if ($mode === 'replace' && !isset($slotsDone[$key])) {
+                    q('DELETE FROM plan WHERE plan_date = ? AND slot = ? AND eaten_at IS NULL', [$date, $slot]);
+                } elseif ($mode === 'fill' && !isset($slotsDone[$key])
+                    && q('SELECT 1 FROM plan WHERE plan_date = ? AND slot = ? LIMIT 1', [$date, $slot])->fetchColumn()) {
+                    $slotsDone[$key] = 'skip';
+                }
+                if (($slotsDone[$key] ?? null) === 'skip') {
+                    continue;
+                }
+                $slotsDone[$key] = 'done';
+                q('INSERT INTO plan (plan_date, slot, recipe_id, servings) VALUES (?, ?, ?, ?)', [$date, $slot, $rid, $servings]);
+                $added++;
+            }
+            db()->commit();
+            out(['added' => $added]);
+
         case 'plan.copy_week':
             // copy one week's plan onto the following week
             $from = date_in($in, 'from');
@@ -863,6 +903,14 @@ try {
 
         case 'trips.delete':
             q('DELETE FROM trips WHERE id = ?', [int_in($in, 'id')]);
+            out(['ok' => true]);
+
+        case 'account.targets':
+            $protein = num_in($in, 'protein_target_g', null, 0, 1000);
+            $kj = num_in($in, 'kj_target', null, 0, 100000);
+            q('UPDATE users SET protein_target_g = ?, kj_target = ? WHERE id = ?', [
+                $protein ? (int)$protein : null, $kj ? (int)$kj : null, $uid,
+            ]);
             out(['ok' => true]);
 
         case 'account.password':
