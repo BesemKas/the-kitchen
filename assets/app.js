@@ -8,7 +8,7 @@ const sheetBody = document.getElementById('sheetBody');
 const titleEl = document.getElementById('title');
 const pill = document.getElementById('budgetPill');
 
-const S = { user: null, users: [], stores: [], budget: 0, spent: 0, month: '', products: [], storeId: null };
+const S = { user: null, users: [], stores: [], budget: 0, spent: 0, month: '', products: [], storeId: null, aisles: [], pendingDel: new Set(), pendingClear: null };
 const UNITS = ['each', 'g', 'kg', 'ml', 'l'];
 const SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
 const NUTRIENTS = [
@@ -62,6 +62,25 @@ function toast(msg) {
   toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
 }
 function fail(e) { toast(e.message || String(e)); }
+/** Toast with an Undo button; `commit` runs after `ms` unless undone. */
+function undoable(msg, commit, undo, ms = 5000) {
+  const t = document.getElementById('toast');
+  t.innerHTML = `<span>${esc(msg)}</span> <button type="button" class="toast-btn">Undo</button>`;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  let done = false;
+  const timer = setTimeout(async () => { done = true; t.hidden = true; try { await commit(); } catch (er) { fail(er); } }, ms);
+  toastTimer = timer;
+  t.querySelector('.toast-btn').onclick = () => { if (done) return; clearTimeout(timer); t.hidden = true; undo(); };
+}
+
+/** Price per kg / litre / item, for comparing pack sizes. */
+function unitPrice(p, price) {
+  if (price === null || price === undefined || !p || !p.pack_size) return '';
+  const per = { g: [1000, 'kg'], kg: [1, 'kg'], ml: [1000, 'l'], l: [1, 'l'] }[p.unit];
+  if (per) return `${money((price / p.pack_size) * per[0])}/${per[1]}`;
+  return p.pack_size > 1 ? `${money(price / p.pack_size)} each` : '';
+}
 
 /* ---------- sheet (bottom drawer) ---------- */
 let sheetOnClose = null;
@@ -141,7 +160,9 @@ async function route() {
 window.addEventListener('hashchange', () => { if (!sheet.hidden) closeSheet(); route(); });
 
 async function loadProducts() {
-  S.products = (await api('products.list')).products;
+  const r = await api('products.list');
+  S.products = r.products;
+  S.aisles = r.aisle_order || [];
   return S.products;
 }
 
@@ -151,6 +172,7 @@ function storeSelect(id = 'storeSel', selected = S.storeId, allowNone = false) {
 }
 
 /* ================= LIST ================= */
+const ICON_USUALS = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>';
 const ICON_SCAN = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10"/></svg>';
 const ICON_POT = '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11h16v3a6 6 0 0 1-6 6h-4a6 6 0 0 1-6-6z"/><path d="M2 11h20M9 7c0-1.5 1-2 1-3M14 7c0-1.5 1-2 1-3"/></svg>';
 const money0 = (v) => (v === null || v === undefined) ? '—' : `${v < 0 ? '-' : ''}R${Math.abs(Math.round(v)).toLocaleString('en-ZA')}`;
@@ -172,11 +194,16 @@ function ringSvg(spent, list, budget) {
 }
 
 async function renderList() {
+  startListPoll();
   const [{ items, spent, budget, takeaway, fridge, today: todayMeals, last_shop: lastShop }] = await Promise.all([api('list.get'), S.products.length ? null : loadProducts()]);
   S.takeawayWeekly = takeaway.weekly;
   S.spent = spent; S.budget = budget; updatePill();
 
-  const lines = items.map((it) => ({ it, p: itemPrice(it) }));
+  S.lastListJson = JSON.stringify(items);
+  S.listItems = items;
+  const lines = items
+    .filter((it) => !S.pendingDel.has(it.id) && !(S.pendingClear === 'all' || (S.pendingClear === 'checked' && it.checked)))
+    .map((it) => ({ it, p: itemPrice(it) }));
   const open = lines.filter(({ it }) => !it.checked);
   const done = lines.filter(({ it }) => it.checked);
   const sum = (arr) => arr.reduce((s, { it, p }) => s + (p.price || 0) * it.qty, 0);
@@ -201,6 +228,7 @@ async function renderList() {
   });
   const complete = compare.filter((c) => c.count > 0 && c.known === c.count);
   const cheapest = complete.length > 1 ? complete.reduce((a, b) => (a.total <= b.total ? a : b)).id : null;
+  const where = shopCompare(lines.map(({ it }) => it));
 
   view.innerHTML = `
     <section class="ring-card">
@@ -215,15 +243,15 @@ async function renderList() {
     ${homeCardsHtml(fridge, takeaway, lastShop)}
     ${todayHtml(todayMeals, fridge)}
 
-    <div class="chips" role="group" aria-label="Shop you're in">
+    ${where ? whereToShopHtml(where) : `<div class="chips" role="group" aria-label="Shop you're in">
       ${compare.map((c) => {
         const detail = !c.count ? '' : c.known === c.count ? ` · <span class="num">${money0(c.total)}</span>` : ` <span class="sub">${c.known}/${c.count}</span>`;
         return `<button type="button" class="chip ${c.id === String(S.storeId) ? 'active' : ''}" data-store="${c.id}" aria-pressed="${c.id === String(S.storeId)}">${esc(c.name)}${detail}${c.id === cheapest ? ' <span class="best">✓</span>' : ''}</button>`;
       }).join('')}
-    </div>
+    </div>`}
 
     <div class="heading-row"><h1>To buy <span class="muted">${open.length}</span></h1><span class="num strong">${money(openTotal)}</span></div>
-    ${open.length ? `<ul class="items">${open.map(rowHtml).join('')}</ul>`
+    ${open.length ? aisleGroups(open).map(([cat, rows]) => `${cat !== null ? `<div class="aisle">${esc(cat)}</div>` : ''}<ul class="items">${rows.map(rowHtml).join('')}</ul>`).join('')
       : `<p class="empty">${done.length ? 'Everything is in the trolley.' : 'Nothing on the list. Add items below, or plan your week and tap “Put the week on my list”.'}</p>`}
 
     ${done.length ? `
@@ -238,6 +266,7 @@ async function renderList() {
         <input id="addInput" placeholder="Add something…" autocomplete="off" enterkeyhint="done" aria-label="Add an item">
         <div id="suggest" class="suggest" hidden></div>
       </div>
+      <button class="scan alt" type="button" data-act="usuals" aria-label="Add something you've bought before">${ICON_USUALS}</button>
       <button class="scan" type="button" data-act="scan" aria-label="Scan a barcode">${ICON_SCAN}</button>
     </div>`;
 
@@ -246,6 +275,8 @@ async function renderList() {
     if (it.brand) sub.push(esc(it.brand));
     const pk = packLabel(it);
     if (pk) sub.push(pk);
+    const up = p.price !== null && it.product_id ? unitPrice(it, p.price) : '';
+    if (up && !it.checked) sub.push(up);
     if (!it.checked) {
       if (p.price === null) sub.push(`<span class="hint">Tap to add the ${esc(storeName(S.storeId))} price</span>`);
       else if (!p.here) sub.push(`<span class="hint">${esc(storeName(p.storeId))} price</span>`);
@@ -287,7 +318,7 @@ async function renderList() {
     const matches = S.products.filter((p) => `${p.name} ${p.brand || ''}`.toLowerCase().includes(q)).slice(0, 6);
     sug.innerHTML = matches.map((p) => {
       const pr = priceAt(p.prices, S.storeId);
-      return `<button data-pid="${p.id}"><span>${esc(p.name)} <span class="muted small">${esc(p.brand || '')} ${packLabel(p)}</span></span><span class="num small">${money(pr.price)}</span></button>`;
+      return `<button data-pid="${p.id}"><span>${esc(p.name)} <span class="muted small">${esc(p.brand || '')} ${packLabel(p)}${p.pantry > 0 ? ` · ${fmtAmount(p.pantry, p.unit)} at home` : ''}</span></span><span class="num small">${money(pr.price)}</span></button>`;
     }).join('') + `<button data-new="1"><span>Add “${esc(input.value.trim())}” as a one-off</span><span class="muted">＋</span></button>`;
     sug.hidden = false;
   };
@@ -323,8 +354,14 @@ async function renderList() {
       switch (el.dataset.act) {
         case 'inc': await api('list.update', { id: it.id, qty: it.qty + 1 }); break;
         case 'dec':
-          if (it.qty <= 1) { if (!confirm(`Remove ${it.name}?`)) return; await api('list.delete', { id: it.id }); }
-          else await api('list.update', { id: it.id, qty: it.qty - 1 });
+          if (it.qty <= 1) {
+            S.pendingDel.add(it.id);
+            renderList();
+            undoable(`Removed ${it.name}`, async () => { await api('list.delete', { id: it.id }); S.pendingDel.delete(it.id); },
+              () => { S.pendingDel.delete(it.id); renderList(); });
+            return;
+          }
+          await api('list.update', { id: it.id, qty: it.qty - 1 });
           break;
         case 'price': {
           const p = itemPrice(it);
@@ -335,9 +372,18 @@ async function renderList() {
           break;
         }
         case 'scan': return scanFlow('list');
+        case 'usuals': return usualsSheet();
         case 'checkout': return checkoutSheet(checkedTotal);
-        case 'clear-checked': if (!confirm('Remove ticked items without logging a shop?')) return; await api('list.clear'); break;
-        case 'clear-all': if (!confirm('Clear the whole list?')) return; await api('list.clear', { all: true }); break;
+        case 'clear-checked':
+        case 'clear-all': {
+          const all = el.dataset.act === 'clear-all';
+          S.pendingClear = all ? 'all' : 'checked';
+          renderList();
+          undoable(all ? 'List cleared' : 'Ticked items removed',
+            async () => { await api('list.clear', all ? { all: true } : {}); S.pendingClear = null; renderList(); },
+            () => { S.pendingClear = null; renderList(); });
+          return;
+        }
         default: return;
       }
       renderList();
@@ -486,12 +532,128 @@ function takeawaySheet(onClose = refreshHome) {
     .catch(fail);
 }
 
+/**
+ * Price the whole list at every shop.
+ * - Estimate: a product with no price at a shop is filled with the average of its known prices elsewhere (shown as ~).
+ * - Verdict: only shops with prices for at least half the list take part, and they're compared on the
+ *   items priced at all of them, so a shop doesn't look cheap just because it has fewer prices.
+ */
+function shopCompare(items) {
+  if (!items.length || S.stores.length < 2) return null;
+  const rows = S.stores.map((s) => ({ id: String(s.id), name: s.name, total: 0, known: 0, guessed: 0, common: 0 }));
+  const priced = [];   // [{ qty, prices: {storeId: price} | null, fixed }]
+  let unpriced = 0; let split = 0; const splitShops = new Set();
+  for (const it of items) {
+    if (it.unit_price !== null && it.unit_price !== undefined) { priced.push({ qty: it.qty, fixed: it.unit_price }); continue; }
+    const known = Object.fromEntries(Object.entries(it.prices || {}).map(([k, v]) => [k, v.price]));
+    if (!Object.keys(known).length) { unpriced++; continue; }
+    priced.push({ qty: it.qty, prices: known });
+  }
+  if (!priced.length) return null;
+  for (const it of priced) {
+    if (it.fixed !== undefined) {
+      for (const r of rows) { r.total += it.fixed * it.qty; r.known++; }
+      split += it.fixed * it.qty;
+      continue;
+    }
+    const vals = Object.values(it.prices);
+    const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const [bestId, bestPrice] = Object.entries(it.prices).sort((a, b) => a[1] - b[1])[0];
+    split += bestPrice * it.qty; splitShops.add(bestId);
+    for (const r of rows) {
+      if (r.id in it.prices) { r.total += it.prices[r.id] * it.qty; r.known++; } else { r.total += avg * it.qty; r.guessed++; }
+    }
+  }
+  const counted = priced.length;
+  let eligible = rows.filter((r) => r.known > 0 && r.known >= Math.ceil(counted / 2));
+  const sharedBy = (shops) => priced.filter((it) => it.fixed !== undefined || shops.every((r) => r.id in it.prices));
+  let shared = sharedBy(eligible);
+  if (eligible.length > 2 && !shared.some((it) => it.fixed === undefined)) {
+    // nothing priced at all of them: fall back to the two shops with the most prices
+    eligible = [...eligible].sort((a, b) => b.known - a.known).slice(0, 2);
+    shared = sharedBy(eligible);
+  }
+  const sharedReal = shared.filter((it) => it.fixed === undefined).length;
+  for (const r of eligible) r.common = shared.reduce((t, it) => t + (it.fixed !== undefined ? it.fixed : it.prices[r.id]) * it.qty, 0);
+  const comparable = eligible.length >= 2 && sharedReal > 0;
+  for (const r of rows) r.eligible = comparable && eligible.includes(r);
+  rows.sort((a, b) => (b.eligible - a.eligible) || (a.eligible ? a.common - b.common : 0) || a.total - b.total);
+  return { rows, counted, unpriced, split, splitShops: splitShops.size, comparable, sharedReal, eligible: eligible.length };
+}
+
+function whereToShopHtml(w) {
+  const here = String(S.storeId);
+  const best = w.rows[0];
+  const lastEligible = w.rows.filter((r) => r.eligible).pop();
+  let verdict;
+  if (w.comparable) {
+    const gap = lastEligible.common - best.common;
+    verdict = gap >= 1
+      ? `Cheapest: <b>${esc(best.name)}</b>, ${money(gap)} less than ${esc(lastEligible.name)} on the ${w.sharedReal} item${w.sharedReal === 1 ? '' : 's'} priced at ${w.eligible === 2 ? 'both' : `all ${w.eligible}`}.`
+      : `${w.eligible === 2 ? 'Both shops' : 'These shops'} cost about the same on the ${w.sharedReal} item${w.sharedReal === 1 ? '' : 's'} priced at each.`;
+    if (w.sharedReal < w.counted / 2) verdict += ' Add more prices to be sure.';
+  } else {
+    verdict = 'Not enough prices to compare shops yet. Prices get saved as you scan or type them in the shop.';
+  }
+  const splitSave = Math.min(...w.rows.filter((r) => !r.guessed).map((r) => r.total).concat([Infinity])) - w.split;
+  return `<section class="card where" aria-label="Where to shop">
+    <div class="heading-row"><h2>Where to shop</h2><span class="small muted">whole list</span></div>
+    <p class="small">${verdict}</p>
+    <div class="shop-rows" role="group" aria-label="Shop you're in">
+      ${w.rows.map((r) => `<button type="button" class="shop-row ${r.id === here ? 'active' : ''}" data-store="${r.id}" aria-pressed="${r.id === here}">
+        <span class="grow"><span class="name">${esc(r.name)}${r.id === here ? ' <span class="tag">you’re here</span>' : ''}</span>
+          <span class="sub">${r.guessed ? `${r.known} of ${w.counted} priced here` : `all ${w.counted} priced here`}</span></span>
+        <span class="right"><span class="num strong">${r.guessed ? '~' : ''}${money(r.total)}</span>
+          <span class="small ${r === best && w.comparable ? 'good-text' : 'muted'}">${!w.comparable ? '' : r === best ? 'cheapest' : r.eligible ? `+${money(r.common - best.common)}` : 'too few prices'}</span></span>
+      </button>`).join('')}
+    </div>
+    ${w.rows.some((r) => r.guessed) ? '<p class="small muted">~ means some prices are guessed from the other shops.</p>' : ''}
+    ${w.splitShops > 1 && Number.isFinite(splitSave) && splitSave >= 1 ? `<p class="small muted">Each item at its cheapest shop: ${money(w.split)}, ${money(splitSave)} less than one shop, but that's ${w.splitShops} stops. Only worth it if you pass them anyway.</p>` : ''}
+    ${w.unpriced ? `<p class="small hint">${w.unpriced} item${w.unpriced === 1 ? ' has' : 's have'} no price anywhere yet, so ${w.unpriced === 1 ? "it's" : "they're"} left out.</p>` : ''}
+  </section>`;
+}
+
+/** Group open list rows by product category in the saved aisle order; uncategorised last. */
+function aisleGroups(rows) {
+  const order = S.aisles || [];
+  const groups = new Map();
+  for (const r of rows) {
+    const c = (r.it.category || '').trim() || 'Other';
+    if (!groups.has(c)) groups.set(c, []);
+    groups.get(c).push(r);
+  }
+  if (groups.size === 1) return [[null, rows]];
+  const rank = (c) => { const i = order.findIndex((o) => o.toLowerCase() === c.toLowerCase()); return i < 0 ? (c === 'Other' ? 1e9 : 1e6) : i; };
+  return [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]));
+}
+
+/* live refresh: while the list is open, pick up the other phone's changes */
+let listPoll = null;
+function startListPoll() {
+  clearInterval(listPoll);
+  listPoll = setInterval(async () => {
+    const onList = location.hash === '' || location.hash === '#list';
+    if (!onList) { clearInterval(listPoll); return; }
+    if (!sheet.hidden || document.visibilityState !== 'visible' || ['INPUT', 'TEXTAREA', 'SELECT'].includes((document.activeElement || {}).tagName)) return;
+    if (S.pendingDel.size || S.pendingClear) return;
+    try {
+      const r = await api('list.get');
+      if (JSON.stringify(r.items) !== S.lastListJson) renderList();
+    } catch { /* offline: try again next tick */ }
+  }, 15000);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && sheet.hidden && (location.hash === '' || location.hash === '#list')) renderList();
+});
+
 function checkoutSheet(estimate) {
   openSheet(`${sheetHead('Finish shop')}
     <form class="stack" id="coForm">
       <p class="muted small">Ticked items come off the list and the amount is logged against this month's budget. Use the total on your till slip.</p>
       <label>Shop ${storeSelect('coStore', S.storeId, true)}</label>
-      <label>Total paid (R) <input id="coTotal" type="number" inputmode="decimal" step="0.01" min="0" value="${round(estimate, 2)}"></label>
+      <div class="row between"><span class="muted">List estimate</span><b class="num">${money(estimate)}</b></div>
+      <label>Total on the till slip (R) <input id="coTotal" type="number" inputmode="decimal" step="0.01" min="0" placeholder="${round(estimate, 2)}" required></label>
+      <p class="small muted">Bought packs are added to what's at home (pantry).</p>
       <label>Date <input id="coDate" type="date" value="${iso(new Date())}"></label>
       <button class="btn primary block">Log shop</button>
     </form>`);
@@ -504,7 +666,10 @@ function checkoutSheet(estimate) {
         date: document.getElementById('coDate').value,
       });
       closeSheet();
-      toast(`Logged ${money(r.total)}`);
+      const diff = r.total - r.estimate;
+      toast(Math.abs(diff) < 0.5 ? `Logged ${money(r.total)}, spot on the estimate`
+        : `Logged ${money(r.total)}: ${money(Math.abs(diff))} ${diff > 0 ? 'more' : 'less'} than the list estimate`);
+      loadProducts();
       route();
     } catch (er) { fail(er); }
   };
@@ -563,23 +728,83 @@ async function scanFlow(from) {
 }
 
 function quickAddSheet(p) {
+  const items = S.listItems || [];
+  const open = items.filter((i) => i.product_id === p.id && !i.checked);
+  const inTrolley = items.find((i) => i.product_id === p.id && i.checked);
+  const want = open.reduce((n, i) => n + Number(i.qty), 0);
   const pr = priceAt(p.prices, S.storeId);
+  const best = priceAt(p.prices, null);
+  const cheaper = pr.here && best.price !== null && best.price < pr.price - 0.004 ? `${money(pr.price - best.price)} cheaper at ${esc(storeName(best.storeId))}` : '';
+  const status = open.length ? `<p class="good-text"><b>On your list</b> · ${fmtQty(want)} wanted</p>`
+    : inTrolley ? `<p class="muted">Already in the trolley (${fmtQty(inTrolley.qty)}). Adding more goes on top.</p>`
+    : '<p class="muted">Not on your list.</p>';
   openSheet(`${sheetHead(p.name)}
     <form class="stack" id="qaForm">
-      <p class="muted small">${esc(p.brand || '')} ${packLabel(p)}</p>
-      <label>Price at ${esc(storeName(S.storeId))} (R) <input id="qaPrice" type="number" inputmode="decimal" step="0.01" min="0" value="${pr.here ? pr.price : ''}" placeholder="${pr.price !== null ? `${storeName(pr.storeId)}: ${pr.price}` : ''}"></label>
-      <label>How many <input id="qaQty" type="number" inputmode="decimal" step="1" min="1" value="1"></label>
-      <button class="btn primary block">Add to list</button>
-      <button class="btn block" type="button" data-act="edit">Edit product</button>
+      <p class="muted small">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price)].filter(Boolean).join(' · ')}</p>
+      ${status}
+      ${cheaper ? `<p class="small hint">${cheaper}</p>` : ''}
+      ${p.pantry > 0 ? `<p class="small muted">${fmtAmount(p.pantry, p.unit)} already at home.</p>` : ''}
+      <label>Price at ${esc(storeName(S.storeId))} (R) <input id="qaPrice" type="number" inputmode="decimal" step="0.01" min="0" value="${pr.here ? pr.price : ''}" placeholder="${pr.price !== null ? `${storeName(pr.storeId)}: ${pr.price}` : 'Shelf price'}"></label>
+      <label>How many <input id="qaQty" type="number" inputmode="decimal" step="1" min="1" value="${open.length ? want : 1}"></label>
+      <button class="btn primary block" data-mode="${open.length ? 'tick' : 'trolley'}">${open.length ? 'Tick it off' : 'Put it in the trolley'}</button>
+      ${open.length ? '' : '<button class="btn block" data-mode="later">Add to the list for later</button>'}
+      <button class="btn block ghost" type="button" data-act="edit">Edit product</button>
     </form>`);
   sheetBody.onclick = (e) => { if (e.target.closest('[data-act=edit]')) { closeSheet(); productEditor(p); } };
   sheetBody.onsubmit = async (e) => {
     e.preventDefault();
+    const mode = (e.submitter && e.submitter.dataset.mode) || (open.length ? 'tick' : 'trolley');
     try {
       const price = document.getElementById('qaPrice').value;
-      if (price !== '' && S.storeId) await api('products.price', { product_id: p.id, store_id: S.storeId, price });
-      await api('list.add', { product_id: p.id, qty: document.getElementById('qaQty').value || 1 });
-      closeSheet(); toast('Added'); loadProducts().then(route);
+      const qty = Number(document.getElementById('qaQty').value) || 1;
+      if (price !== '' && S.storeId && Number(price) !== (pr.here ? pr.price : null)) await api('products.price', { product_id: p.id, store_id: S.storeId, price });
+      if (mode === 'tick') {
+        // tick the first open line with the scanned amount; any other open lines for it get ticked too
+        await api('list.update', { id: open[0].id, qty, checked: true });
+        for (const o of open.slice(1)) await api('list.delete', { id: o.id });
+      } else {
+        await api('list.add', { product_id: p.id, qty, checked: mode === 'trolley' });
+      }
+      closeSheet();
+      toast(mode === 'later' ? `Added ${p.name}` : `${p.name} is in the trolley`);
+      await loadProducts(); route();
+    } catch (er) { fail(er); }
+  };
+}
+
+/** Pick products you've scanned or bought before, to get exactly the same thing again. */
+async function usualsSheet() {
+  await loadProducts();
+  const onList = new Map();
+  for (const it of S.listItems || []) if (it.product_id && !it.checked) onList.set(it.product_id, (onList.get(it.product_id) || 0) + Number(it.qty));
+  const sorted = [...S.products].sort((a, b) => (b.bought_count - a.bought_count) || String(b.last_bought || '').localeCompare(String(a.last_bought || '')) || a.name.localeCompare(b.name));
+  openSheet(`${sheetHead('Bought before')}
+    <input id="usSearch" placeholder="Search your products" autocomplete="off" aria-label="Search your products">
+    <p class="small muted">Most-bought first. Tap ＋ to add the exact same product to the list.</p>
+    <ul class="list" id="usList"></ul>`, () => renderList());
+  sheetBody.classList.add('full');
+  const draw = () => {
+    const term = document.getElementById('usSearch').value.trim().toLowerCase();
+    const rows = sorted.filter((p) => !term || `${p.name} ${p.brand || ''} ${p.category || ''}`.toLowerCase().includes(term));
+    document.getElementById('usList').innerHTML = rows.map((p) => {
+      const pr = priceAt(p.prices, S.storeId);
+      const n = onList.get(p.id) || 0;
+      const bits = [esc(p.brand || ''), packLabel(p), pr.price !== null ? `${money(pr.price)}${pr.here ? '' : ` at ${esc(storeName(pr.storeId))}`}` : 'no price',
+        p.bought_count ? `bought ${p.bought_count}×` : '', p.pantry > 0 ? `<span class="good-text">${fmtAmount(p.pantry, p.unit)} at home</span>` : ''].filter(Boolean);
+      return `<li data-pid="${p.id}"><div class="grow"><div class="name">${esc(p.name)}${n ? ` <span class="tag">${fmtQty(n)} on list</span>` : ''}</div><div class="sub">${bits.join(' · ')}</div></div>
+        <button type="button" class="icon-btn add-btn" data-add="${p.id}" aria-label="Add ${esc(p.name)} to the list">＋</button></li>`;
+    }).join('') || `<li class="empty">${S.products.length ? 'No matches.' : 'Nothing scanned yet. Scan products as you shop and they show up here.'}</li>`;
+  };
+  draw();
+  sheetBody.oninput = (e) => { if (e.target.id === 'usSearch') draw(); };
+  sheetBody.onclick = async (e) => {
+    const b = e.target.closest('[data-add]');
+    if (!b) return;
+    const id = Number(b.dataset.add);
+    try {
+      await api('list.add', { product_id: id, qty: 1 });
+      onList.set(id, (onList.get(id) || 0) + 1);
+      draw();
     } catch (er) { fail(er); }
   };
 }
@@ -604,8 +829,9 @@ async function renderProducts() {
       const pr = priceAt(p.prices, S.storeId);
       const n = Object.keys(p.prices).length;
       return `<li class="tap" data-id="${p.id}"><div class="grow"><div class="name">${esc(p.name)}</div>
-        <div class="sub">${[esc(p.brand || ''), packLabel(p), p.energy_kj !== null || p.protein_g !== null ? 'nutrition ✓' : ''].filter(Boolean).join(' · ')}</div></div>
-        <div class="right"><div class="num strong">${money(pr.price)}</div><div class="small muted">${pr.price === null ? 'no price' : pr.here ? esc(storeName(pr.storeId)) : `at ${esc(storeName(pr.storeId))}`}${n > 1 ? ` · ${n} shops` : ''}</div></div></li>`;
+        <div class="sub">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price), p.pantry > 0 ? `<span class="good-text">${fmtAmount(p.pantry, p.unit)} at home</span>` : ''].filter(Boolean).join(' · ')}</div></div>
+        <div class="right"><div class="num strong">${money(pr.price)}</div><div class="small muted">${pr.price === null ? 'no price' : pr.here ? esc(storeName(pr.storeId)) : `at ${esc(storeName(pr.storeId))}`}${n > 1 ? ` · ${n} shops` : ''}</div></div>
+        <button type="button" class="icon-btn add-btn" data-add="${p.id}" aria-label="Add ${esc(p.name)} to the list">＋</button></li>`;
     }).join('') : `<li class="empty">${S.products.length ? 'No matches.' : 'No products yet. Scan something or tap ＋.'}</li>`;
   };
   draw();
@@ -614,6 +840,12 @@ async function renderProducts() {
     const act = e.target.closest('[data-act]');
     if (act && act.dataset.act === 'scan') return scanFlow('products');
     if (act && act.dataset.act === 'new') return productEditor({ id: null, name: '', brand: '', barcode: '', pack_size: 1, unit: 'each', category: '', prices: {} });
+    const add = e.target.closest('[data-add]');
+    if (add) {
+      const p = S.products.find((x) => x.id === Number(add.dataset.add));
+      api('list.add', { product_id: p.id, qty: 1 }).then(() => toast(`${p.name} added to the list`)).catch(fail);
+      return;
+    }
     const li = e.target.closest('li[data-id]');
     if (li) productEditor(S.products.find((p) => p.id === Number(li.dataset.id)));
   };
@@ -625,7 +857,7 @@ function productEditor(p, { addToList = false } = {}) {
       <label>Name <input name="name" required value="${esc(p.name)}"></label>
       <div class="grid2">
         <label>Brand <input name="brand" value="${esc(p.brand || '')}"></label>
-        <label>Category <input name="category" value="${esc(p.category || '')}" placeholder="Meat, dairy…"></label>
+        <label>Aisle <input name="category" list="aisleList" value="${esc(p.category || '')}" placeholder="Pick or type"><datalist id="aisleList">${(S.aisles || []).map((a) => `<option value="${esc(a)}">`).join('')}</datalist></label>
       </div>
       <div class="grid2">
         <label>Pack size <input name="pack_size" type="number" inputmode="decimal" step="0.001" min="0.001" value="${p.pack_size || 1}"></label>
@@ -633,6 +865,7 @@ function productEditor(p, { addToList = false } = {}) {
       </div>
       <div class="row"><label class="grow">Barcode <input name="barcode" inputmode="numeric" value="${esc(p.barcode || '')}"></label><button type="button" class="btn" data-act="scan-code">📷</button></div>
 
+      <label>At home now (${esc(p.unit === 'each' ? 'items' : p.unit || 'each')}) <input name="pantry" type="number" inputmode="decimal" step="0.001" min="0" value="${p.pantry ? round(p.pantry, 3) : ''}" placeholder="0"></label>
       <fieldset><legend>Price per pack</legend>
         ${S.stores.map((s) => `<label>${esc(s.name)} <input name="price_${s.id}" type="number" inputmode="decimal" step="0.01" min="0" value="${p.prices && p.prices[s.id] ? p.prices[s.id].price : ''}"></label>`).join('') || '<p class="muted small">Add shops on the Budget tab first.</p>'}
       </fieldset>
@@ -703,6 +936,8 @@ function productEditor(p, { addToList = false } = {}) {
     try {
       const data = collect();
       const { product } = await api('products.save', { id: p.id, ...data });
+      const home = form.pantry.value === '' ? 0 : Number(form.pantry.value);
+      if (home !== (p.pantry || 0)) await api('pantry.set', { product_id: product.id, amount: home });
       if (addToList) await api('list.add', { product_id: product.id, qty: 1 });
       closeSheet();
       toast(addToList ? 'Saved and added to list' : 'Saved');
@@ -1435,6 +1670,7 @@ async function planAddSheet(date, recipeId = null) {
 async function renderBudget() {
   const month = store.get('budgetMonth', null) || S.month;
   const b = await api('budget.get', { month });
+  S.aisles = b.aisle_order || [];
   if (month === S.month) { S.spent = b.spent; S.budget = b.budget; updatePill(); }
   const left = b.budget - b.spent;
   const [y, m] = month.split('-').map(Number);
@@ -1474,7 +1710,7 @@ async function renderBudget() {
     <section class="card flush">
       <div class="section-head"><h2 class="grow">Shops this month</h2><button class="btn small" data-act="add-trip">＋ Log spend</button></div>
       <ul class="list">${b.trips.map((t) => `<li><div class="grow"><div class="name">${esc(t.store || (t.kind === 'eating_out' ? (t.note || 'Takeaway') : 'Other'))}${t.kind === 'eating_out' ? '<span class="tag warn">takeaway</span>' : ''}</div>
-        <div class="sub">${esc(t.trip_date)}${t.who ? ` · ${esc(t.who)}` : ''}${t.note ? ` · ${esc(t.note)}` : ''}</div></div>
+        <div class="sub">${esc(t.trip_date)}${t.who ? ` · ${esc(t.who)}` : ''}${t.note && t.kind !== 'eating_out' ? ` · ${esc(t.note)}` : ''}${t.estimate !== null && t.estimate !== undefined && t.estimate > 0 ? ` · <span class="${Math.abs(t.total - t.estimate) / t.estimate > 0.05 ? 'warn-text' : 'good-text'}">est. ${money(t.estimate)}</span>` : ''}</div></div>
         <b class="num">${money(t.total)}</b><button class="icon-btn" data-del-trip="${t.id}" aria-label="Delete">✕</button></li>`).join('') || '<li class="empty">No shops logged yet.</li>'}</ul>
     </section>
 
@@ -1487,6 +1723,10 @@ async function renderBudget() {
           <label>Energy (kJ) <input name="kj" type="number" inputmode="numeric" min="0" value="${(S.users.find((u) => u.id === S.user.id) || {}).kj_target ?? ''}"></label>
         </div>
         <button class="btn">Save targets</button></form>
+      <div class="stack tight"><span class="small muted">Aisle order (how the shopping list is grouped)</span>
+        <ul class="list card flush" id="aisleEd">${(S.aisles || []).map((a, i) => `<li><span class="grow">${esc(a)}</span><button type="button" class="icon-btn" data-aisle-up="${i}" aria-label="Move ${esc(a)} up" ${i ? '' : 'disabled'}>↑</button><button type="button" class="icon-btn" data-aisle-del="${i}" aria-label="Remove ${esc(a)}">✕</button></li>`).join('')}</ul>
+        <form class="row" id="aisleAdd"><input name="aisle" class="grow" placeholder="Add an aisle"><button class="btn">Add</button></form>
+      </div>
       <form class="row" id="taWeekly"><label class="grow">Weekly takeaway allowance (R) <input name="weekly" type="number" inputmode="decimal" step="0.01" min="0" value="${b.takeaway_weekly}"></label><button class="btn">Save</button></form>
       <div>
         <div class="small muted">Shops</div>
@@ -1509,15 +1749,25 @@ async function renderBudget() {
         S.users = (await api('bootstrap')).users;
         toast('Targets saved');
       }
+      if (e.target.id === 'aisleAdd' && e.target.aisle.value.trim()) {
+        S.aisles = (await api('aisles.set', { order: [...S.aisles, e.target.aisle.value.trim()] })).aisle_order;
+      }
       if (e.target.id === 'taWeekly') { await api('takeaway.set', { weekly: e.target.weekly.value }); toast('Takeaway allowance saved'); }
       if (e.target.id === 'storeForm') { await api('stores.add', { name: e.target.name.value }); await refreshStores(); }
       renderBudget();
     } catch (er) { fail(er); }
   };
   view.onclick = async (e) => {
-    const t = e.target.closest('[data-month],[data-act],[data-del-trip],[data-del-store],[data-rename]');
+    const t = e.target.closest('[data-month],[data-act],[data-del-trip],[data-del-store],[data-rename],[data-aisle-up],[data-aisle-del]');
     if (!t) return;
     try {
+      if (t.dataset.aisleUp || t.dataset.aisleDel) {
+        const order = [...S.aisles];
+        if (t.dataset.aisleUp) { const i = Number(t.dataset.aisleUp); [order[i - 1], order[i]] = [order[i], order[i - 1]]; }
+        else order.splice(Number(t.dataset.aisleDel), 1);
+        S.aisles = (await api('aisles.set', { order })).aisle_order;
+        return renderBudget();
+      }
       if (t.dataset.month) { store.set('budgetMonth', t.dataset.month); return renderBudget(); }
       if (t.dataset.delTrip) { if (!confirm('Delete this logged shop?')) return; await api('trips.delete', { id: t.dataset.delTrip }); return renderBudget(); }
       if (t.dataset.delStore) {

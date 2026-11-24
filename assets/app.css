@@ -335,3 +335,23 @@ body.auth { min-height: 100vh; display: grid; place-items: center; padding: 18px
 
 .chips.wrap { flex-wrap: wrap; overflow: visible; margin: 0; padding: 0; }
 .wz-day { width: 36px; flex: none; }
+
+.aisle { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 4px 2px -6px; }
+.toast-btn { margin-left: 10px; border: 0; background: none; color: var(--accent-deep); font-weight: 800; cursor: pointer; text-decoration: underline; font-size: .9rem; }
+
+.where { display: grid; gap: 10px; }
+.where h2 { margin: 0; font-size: 1.05rem; }
+.where p { margin: 0; }
+.shop-rows { display: grid; gap: 6px; }
+.shop-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; cursor: pointer;
+  padding: 10px 12px; border-radius: 14px; border: 1px solid var(--line); background: transparent; color: var(--text); font: inherit;
+}
+.shop-row .grow { display: grid; gap: 2px; min-width: 0; }
+.shop-row .name { font-weight: 700; }
+.shop-row .sub { font-size: .8rem; color: var(--muted); }
+.shop-row .right { display: grid; justify-items: end; gap: 2px; }
+.shop-row.active { border-color: var(--accent); background: rgb(212 242 92 / .08); }
+.addbar .scan.alt { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
+.add-btn { flex: none; width: 40px; height: 40px; border-radius: 999px; background: rgb(212 242 92 / .14); color: var(--accent); font-size: 1.2rem; }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
