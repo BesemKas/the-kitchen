@@ -42,7 +42,7 @@ async function api(action, data = {}) {
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (v) => (v === null || v === undefined || Number.isNaN(v)) ? '—'
-  : 'R' + Number(v).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  : (v < 0 ? '-R' : 'R') + Math.abs(Number(v)).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const round = (v, d = 1) => Math.round(v * 10 ** d) / 10 ** d;
 const fmtQty = (v) => String(round(v, 2));
 const packLabel = (p) => p && p.unit && p.unit !== 'each' ? `${fmtQty(p.pack_size)} ${p.unit}` : (p && p.pack_size > 1 ? `${fmtQty(p.pack_size)} pack` : '');
@@ -67,6 +67,7 @@ function fail(e) { toast(e.message || String(e)); }
 let sheetOnClose = null;
 function openSheet(html, onClose = null) {
   sheetBody.innerHTML = html;
+  sheetBody.classList.remove('full');
   sheet.hidden = false;
   sheetOnClose = onClose;
   sheetBody.onclick = sheetBody.oninput = sheetBody.onchange = sheetBody.onsubmit = null;
@@ -171,7 +172,8 @@ function ringSvg(spent, list, budget) {
 }
 
 async function renderList() {
-  const [{ items, spent, budget }] = await Promise.all([api('list.get'), S.products.length ? null : loadProducts()]);
+  const [{ items, spent, budget, takeaway, fridge, last_shop: lastShop }] = await Promise.all([api('list.get'), S.products.length ? null : loadProducts()]);
+  S.takeawayWeekly = takeaway.weekly;
   S.spent = spent; S.budget = budget; updatePill();
 
   const lines = items.map((it) => ({ it, p: itemPrice(it) }));
@@ -209,6 +211,8 @@ async function renderList() {
         ${items.length ? `<span class="small ${after < 0 ? 'bad-text' : 'good-text'}">${after < 0 ? `${money0(-after)} over after this list` : `${money0(after)} after this list`}</span>` : `<span class="small muted">of ${money0(budget)} this month</span>`}
       </div>
     </section>
+
+    ${homeCardsHtml(fridge, takeaway, lastShop)}
 
     <div class="chips" role="group" aria-label="Shop you're in">
       ${compare.map((c) => {
@@ -304,6 +308,8 @@ async function renderList() {
   };
 
   view.onclick = async (e) => {
+    const home = e.target.closest('[data-home]');
+    if (home) return home.dataset.home === 'fridge' ? fridgeSheet() : takeawaySheet();
     const chip = e.target.closest('[data-store]');
     if (chip) { S.storeId = chip.dataset.store; store.set('store', S.storeId); return renderList(); }
     const el = e.target.closest('[data-act]');
@@ -334,6 +340,128 @@ async function renderList() {
       renderList();
     } catch (er) { fail(er); }
   };
+}
+
+/* ---------- home: meals ready + takeaways ---------- */
+function homeCardsHtml(fridge, takeaway, lastShop) {
+  const portions = fridge.reduce((s, f) => s + f.portions, 0);
+  const oldest = fridge.reduce((m, f) => (m && m.age_days >= f.age_days ? m : f), null);
+  let fridgeNote = portions ? `${fridge.length} batch${fridge.length === 1 ? '' : 'es'}` : 'Cook something';
+  let fridgeClass = 'muted';
+  if (oldest && oldest.age_days >= 4) { fridgeNote = `${esc(oldest.name)}: ${oldest.age_days} days old`; fridgeClass = 'bad-text'; }
+  else if (oldest && oldest.age_days >= 3) { fridgeNote = `Eat the ${esc(oldest.name)} first`; fridgeClass = 'warn-text'; }
+  const left = takeaway.weekly - takeaway.spent;
+  const days = lastShop ? Math.floor((new Date() - parseIso(lastShop)) / 86400000) : null;
+  return `<div class="grid2">
+      <button type="button" class="tile" data-home="fridge">
+        <span class="small muted">Meals ready</span>
+        <span class="big num">${fmtQty(portions)}</span>
+        <span class="small ${fridgeClass}">${fridgeNote}</span>
+      </button>
+      <button type="button" class="tile" data-home="takeaway">
+        <span class="small muted">Takeaways left this week</span>
+        <span class="big num ${left < 0 ? 'bad-text' : ''}">${money0(left)}</span>
+        <span class="small muted">of ${money0(takeaway.weekly)} · tap to log</span>
+      </button>
+    </div>
+    ${days !== null && days > 7 ? `<p class="banner">No shop logged for ${days} days. Log your till slips so the budget stays honest.</p>` : ''}`;
+}
+
+const refreshHome = () => { if (location.hash === '' || location.hash === '#list') route(); };
+
+function fridgeSheet() {
+  const draw = (fridge) => {
+    openSheet(`${sheetHead('Meals in the fridge')}
+      ${fridge.length ? `<ul class="list card flush">${fridge.map((f) => {
+        const ageCls = f.age_days >= 4 ? 'bad-text' : f.age_days >= 3 ? 'warn-text' : 'muted';
+        const age = f.age_days === 0 ? 'cooked today' : f.age_days === 1 ? 'cooked yesterday' : `cooked ${f.age_days} days ago`;
+        return `<li class="fridge-row" data-id="${f.id}">
+          <div class="fr-top"><span class="name grow">${esc(f.name)}</span><span class="big-n num">${fmtQty(f.portions)}<span class="small muted"> left</span></span></div>
+          <div class="fr-bottom">
+            <span class="sub grow"><span class="${ageCls}">${age}</span>${f.grams_per_portion ? ` · ${f.grams_per_portion} g each` : ''}${f.cost_per_portion !== null ? ` · ${money(f.cost_per_portion)} each` : ''}</span>
+            <button class="icon-btn" data-act="more" aria-label="Change or bin ${esc(f.name)}">⋯</button>
+            <button class="btn small primary" data-act="eat">Ate one</button>
+          </div></li>`;
+      }).join('')}</ul>
+      <p class="small muted">Cooked food keeps about 3–4 days in the fridge. Freeze what you won't get to.</p>` : '<p class="empty">Nothing cooked yet. Open a recipe and tap “Cooked it”, or finish cook mode.</p>'}
+      <button class="btn block" data-act="add">＋ Add cooked food</button>`, refreshHome);
+    sheetBody.onclick = async (e) => {
+      const a = e.target.closest('[data-act]');
+      if (!a) return;
+      const li = a.closest('li');
+      const f = li ? fridge.find((x) => x.id === Number(li.dataset.id)) : null;
+      try {
+        if (a.dataset.act === 'eat') { draw((await api('fridge.eat', { id: f.id })).fridge); toast('Enjoy'); }
+        if (a.dataset.act === 'more') {
+          const v = await askNumber(`${f.name}: portions left`, f.portions, { hint: 'Set to 0 if it was eaten, frozen elsewhere or binned.', step: '1' });
+          if (v === null) return fridgeSheet();
+          draw((await api('fridge.set', { id: f.id, portions: v })).fridge);
+        }
+        if (a.dataset.act === 'add') addCookedSheet();
+      } catch (er) { fail(er); }
+    };
+  };
+  api('fridge.list').then((r) => draw(r.fridge)).catch(fail);
+}
+
+async function addCookedSheet() {
+  if (!S.recipes) S.recipes = (await api('recipes.list')).recipes;
+  openSheet(`${sheetHead('Add cooked food')}
+    <form class="stack" id="ckForm">
+      <label>Recipe <select name="recipe_id"><option value="">Something else</option>${S.recipes.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select></label>
+      <label>Or a name <input name="name" placeholder="Leftover curry"></label>
+      <div class="grid2">
+        <label>Portions <input name="portions" type="number" inputmode="decimal" min="0.5" step="0.5" value="4" required></label>
+        <label>Grams each <input name="grams" type="number" inputmode="numeric" min="0"></label>
+      </div>
+      <label>Cooked on <input name="date" type="date" value="${iso(new Date())}"></label>
+      <button class="btn primary block">Add to fridge</button>
+    </form>`, () => fridgeSheet());
+  sheetBody.onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      await api('fridge.cook', { recipe_id: f.recipe_id.value || null, name: f.name.value, portions: f.portions.value, grams_per_portion: f.grams.value || null, date: f.date.value });
+      closeSheet();
+    } catch (er) { fail(er); }
+  };
+}
+
+function takeawaySheet(onClose = refreshHome) {
+  const draw = (t, portions) => {
+    const left = t.weekly - t.spent;
+    openSheet(`${sheetHead('Log a takeaway')}
+      <div class="row between"><span class="muted">Left this week</span><b class="num ${left < 0 ? 'bad-text' : 'good-text'}">${money(left)}</b></div>
+      ${portions ? `<p class="small muted">You have ${fmtQty(portions)} meal${portions === 1 ? '' : 's'} ready in the fridge.</p>` : ''}
+      <form class="stack" id="taForm">
+        <label>Amount (R) <input name="total" type="number" inputmode="decimal" min="0" step="0.01" required></label>
+        <label>Where / what <input name="note" placeholder="Nando's, pizza night…"></label>
+        <label>Date <input name="date" type="date" value="${iso(new Date())}"></label>
+        <button class="btn primary block">Log it</button>
+      </form>
+      ${t.items.length ? `<h3>This week</h3><ul class="list card flush">${t.items.map((i) => `<li><div class="grow"><div class="name">${esc(i.note || 'Takeaway')}</div><div class="sub">${esc(i.trip_date)}</div></div><b class="num">${money(i.total)}</b><button class="icon-btn" data-del="${i.id}" aria-label="Delete">✕</button></li>`).join('')}</ul>` : ''}
+      <p class="small muted">Weekly allowance ${money0(t.weekly)}. Change it on the Budget tab.</p>`,
+    onClose);
+    setTimeout(() => { const i = sheetBody.querySelector('[name=total]'); if (i) i.focus(); }, 60);
+    sheetBody.onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        const r = await api('takeaway.add', { total: f.total.value, note: f.note.value, date: f.date.value });
+        const l = r.takeaway.weekly - r.takeaway.spent;
+        toast(l >= 0 ? `Logged. ${money0(l)} left this week` : `Logged. ${money0(-l)} over this week`);
+        draw(r.takeaway, portions);
+      } catch (er) { fail(er); }
+    };
+    sheetBody.onclick = async (e) => {
+      const d = e.target.closest('[data-del]');
+      if (!d || !confirm('Delete this takeaway?')) return;
+      try { await api('trips.delete', { id: d.dataset.del }); draw((await api('takeaway.get')).takeaway, portions); } catch (er) { fail(er); }
+    };
+  };
+  Promise.all([api('takeaway.get'), api('fridge.list')])
+    .then(([t, f]) => draw(t.takeaway, f.fridge.reduce((s, x) => s + x.portions, 0)))
+    .catch(fail);
 }
 
 function checkoutSheet(estimate) {
@@ -563,22 +691,34 @@ function productEditor(p, { addToList = false } = {}) {
 }
 
 /* ================= RECIPES ================= */
+const fmtMins = (m) => {
+  if (!m) return '';
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`;
+};
+const unitWord = (u) => (u === 'each' ? '×' : u);
+const recipeSteps = (r) => (r.steps && r.steps.length ? r.steps
+  : (r.instructions || '').split(/\n+/).map((s) => s.trim()).filter(Boolean).map((body) => ({ body, timer_minutes: null })));
+
 async function renderRecipes() {
   const [{ recipes }] = await Promise.all([api('recipes.list'), loadProducts()]);
   S.recipes = recipes;
   view.innerHTML = `
     <button class="btn primary block" data-act="new">＋ New recipe</button>
-    ${recipes.length ? recipes.map((r) => `
-      <article class="card stack tap" data-id="${r.id}">
-        <div class="row"><h2 class="grow">${esc(r.name)}</h2><span class="num strong">${money(r.cost_per_serving)}<span class="small muted"> /serving</span></span></div>
-        <div class="small muted">${r.servings} serving${r.servings > 1 ? 's' : ''} · ${money(r.cost)} total · ${r.items.length} ingredient${r.items.length === 1 ? '' : 's'}
+    ${recipes.length ? recipes.map((r) => {
+      const time = (r.prep_minutes || 0) + (r.cook_minutes || 0);
+      const steps = recipeSteps(r).length;
+      return `<article class="card stack tap" data-id="${r.id}">
+        <div class="row"><h2 class="grow">${esc(r.name)}</h2><span class="num strong">${money(r.cost_per_serving)}<span class="small muted"> /portion</span></span></div>
+        <div class="small muted">${r.servings} portion${r.servings > 1 ? 's' : ''} · ${money(r.cost)} a batch${time ? ` · ${fmtMins(time)}` : ''}${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}
           ${r.missing_prices ? `<span class="tag warn">${r.missing_prices} unpriced</span>` : ''}</div>
         ${nutriHtml(r.nutrition_per_serving, r.missing_nutrition, r.items.length)}
-      </article>`).join('') : '<p class="empty">No recipes yet. Add the meals you prep. Each ingredient is a product, so the cost works itself out.</p>'}`;
+      </article>`;
+    }).join('') : '<p class="empty">No recipes yet. Add the meals you prep: ingredients come from your products, so cost and nutrition work themselves out.</p>'}`;
   view.onclick = (e) => {
-    if (e.target.closest('[data-act=new]')) return recipeEditor({ id: null, name: '', servings: 4, instructions: '', items: [] });
+    if (e.target.closest('[data-act=new]')) return recipeEditor({ id: null, name: '', servings: 4, instructions: '', prep_minutes: null, cook_minutes: null, items: [], steps: [] });
     const card = e.target.closest('[data-id]');
-    if (card) recipeEditor(recipes.find((r) => r.id === Number(card.dataset.id)));
+    if (card) recipeView(recipes.find((r) => r.id === Number(card.dataset.id)));
   };
 }
 
@@ -593,84 +733,342 @@ function nutriHtml(n, missing, count) {
   </div>${missing ? `<div class="small warn-text">${missing} ingredient${missing > 1 ? 's' : ''} without nutrition info</div>` : ''}`;
 }
 
+/** Scale a recipe to a number of portions: amounts, cost of what's used, and whole packs to buy. */
+function scaleRecipe(r, portions) {
+  const f = portions / r.servings;
+  let used = 0; let toBuy = 0; let missing = 0;
+  const items = r.items.map((it) => {
+    const p = S.products.find((x) => x.id === it.product_id);
+    const price = p ? priceAt(p.prices, null).price : null;
+    const amount = it.amount * f;
+    const packs = Math.max(1, Math.ceil(amount / it.pack_size - 1e-6));
+    const cost = price === null ? null : (amount / it.pack_size) * price;
+    if (price === null) missing++;
+    else { used += cost; toBuy += packs * price; }
+    return { ...it, amount, packs, cost };
+  });
+  return { items, used, toBuy, missing, perPortion: used / portions };
+}
+
+function recipeView(r, portions = r.servings) {
+  let n = portions;
+  let first = true;
+  const steps = recipeSteps(r);
+  const draw = () => {
+    const keepY = first ? 0 : sheetBody.scrollTop;
+    first = false;
+    const sc = scaleRecipe(r, n);
+    const time = [r.prep_minutes ? `Prep ${fmtMins(r.prep_minutes)}` : '', r.cook_minutes ? `Cook ${fmtMins(r.cook_minutes)}` : ''].filter(Boolean).join(' · ');
+    openSheet(`${sheetHead(r.name)}
+      ${time ? `<p class="small muted">${time}</p>` : ''}
+      <section class="card stack">
+        <div class="row between">
+          <span class="strong">Portions to make</span>
+          <div class="qty big"><button type="button" data-act="minus" aria-label="Fewer portions">−</button><span>${fmtQty(n)}</span><button type="button" data-act="plus" aria-label="More portions">+</button></div>
+        </div>
+        <div class="grid3 right">
+          <div><div class="small muted">Per portion</div><b class="num">${money(sc.perPortion)}</b></div>
+          <div><div class="small muted">Batch uses</div><b class="num">${money(sc.used)}</b></div>
+          <div><div class="small muted">Packs cost</div><b class="num">${money(sc.toBuy)}</b></div>
+        </div>
+        ${sc.missing ? `<p class="small warn-text">${sc.missing} ingredient${sc.missing > 1 ? 's have' : ' has'} no price yet, so costs are low.</p>` : ''}
+        ${n !== r.servings ? `<p class="small muted">Scaled from the recipe's ${r.servings} portions.</p>` : ''}
+      </section>
+
+      <button class="btn primary block" data-act="cook">Start cook mode</button>
+
+      <section class="stack">
+        <h3>Ingredients</h3>
+        <ul class="ing-list">${sc.items.map((it) => `<li>
+          <span class="amt num">${fmtAmount(it.amount, it.unit)}</span>
+          <span class="grow">${esc(it.name)}${it.note ? `<span class="muted">, ${esc(it.note)}</span>` : ''}<span class="small muted block">buy ${it.packs} × ${fmtQty(it.pack_size)} ${unitWord(it.unit)}</span></span>
+          <span class="num small">${money(it.cost)}</span></li>`).join('') || '<li class="muted">No ingredients yet.</li>'}</ul>
+      </section>
+
+      ${steps.length ? `<section class="stack"><h3>Method</h3><ol class="steps">${steps.map((s) => `<li>${esc(s.body)}${s.timer_minutes ? ` <span class="tag">${fmtMins(s.timer_minutes)}</span>` : ''}</li>`).join('')}</ol></section>` : ''}
+      ${r.steps && r.steps.length && r.instructions ? `<section class="stack"><h3>Notes</h3><p class="small muted pre">${esc(r.instructions)}</p></section>` : ''}
+
+      ${r.nutrition_per_serving && r.missing_nutrition < r.items.length ? `<section class="stack"><h3>Per portion</h3>${nutriHtml(r.nutrition_per_serving, r.missing_nutrition, r.items.length)}</section>` : ''}
+
+      <section class="card stack">
+        <h3>Portion weights</h3>
+        <p class="small muted">Weigh the whole cooked batch, then split it evenly.</p>
+        <div class="row"><label class="grow">Cooked batch (g) <input id="batchG" type="number" inputmode="numeric" min="0" step="1"></label>
+          <div class="right"><div class="small muted">Each container</div><b id="perG" class="num">—</b></div></div>
+      </section>
+
+      <div class="grid2">
+        <button class="btn" data-act="fridge">Cooked it → fridge</button>
+        <button class="btn" data-act="list">Add to list</button>
+        <button class="btn" data-act="plan">Add to plan</button>
+        <button class="btn" data-act="edit">Edit recipe</button>
+      </div>`);
+    sheetBody.scrollTop = keepY;
+    const batch = document.getElementById('batchG');
+    const per = () => {
+      const g = Number(batch.value);
+      document.getElementById('perG').textContent = g > 0 ? `${Math.round(g / n)} g` : '—';
+    };
+    batch.oninput = per;
+    sheetBody.onclick = async (e) => {
+      const t = e.target.closest('[data-act]');
+      if (!t) return;
+      try {
+        switch (t.dataset.act) {
+          case 'minus': n = Math.max(1, n - 1); return draw();
+          case 'plus': n = Math.min(100, n + 1); return draw();
+          case 'cook': closeSheet(); return cookMode(r, n);
+          case 'edit': closeSheet(); return recipeEditor(r);
+          case 'plan': closeSheet(); return planAddSheet(iso(new Date()), r.id);
+          case 'list': {
+            const res = await api('recipes.to_list', { id: r.id, portions: n });
+            toast(`${res.added} item${res.added === 1 ? '' : 's'} added to the list`);
+            return;
+          }
+          case 'fridge': {
+            const g = Number(batch.value);
+            await api('fridge.cook', { recipe_id: r.id, portions: n, grams_per_portion: g > 0 ? Math.round(g / n) : null });
+            closeSheet();
+            toast(`${fmtQty(n)} portions in the fridge`);
+            return;
+          }
+          default:
+        }
+      } catch (er) { fail(er); }
+    };
+  };
+  draw();
+}
+
+/* ---------- cook mode ---------- */
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && 'wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+    else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch { /* not supported or denied: the screen may dim, nothing else breaks */ }
+}
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [0, 0.35, 0.7].forEach((t) => {
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.frequency.value = 880; o.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.25, ctx.currentTime + t); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.3);
+      o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.3);
+    });
+  } catch { /* no audio */ }
+  if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
+}
+
+function cookMode(r, portions) {
+  const steps = recipeSteps(r);
+  const sc = scaleRecipe(r, portions);
+  let idx = -1; // -1 = gather ingredients, steps.length = done
+  const timers = {}; // step index -> { end, left, running }
+  const fmtClock = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+  let tick = null;
+
+  const draw = () => {
+    let body;
+    if (idx < 0) {
+      body = `<p class="muted">Get everything out first. Amounts are for ${fmtQty(portions)} portions.</p>
+        <ul class="ing-list check">${sc.items.map((it) => `<li><label class="row grow"><input type="checkbox"><span class="amt num">${fmtAmount(it.amount, it.unit)}</span><span class="grow">${esc(it.name)}${it.note ? `<span class="muted">, ${esc(it.note)}</span>` : ''}</span></label></li>`).join('')}</ul>
+        <button class="btn primary block" data-act="next">${steps.length ? 'Start cooking' : 'Done cooking'}</button>`;
+    } else if (idx < steps.length) {
+      const s = steps[idx];
+      const t = timers[idx];
+      const timerHtml = s.timer_minutes ? `<div class="timer">
+          <span class="num clock" id="clock">${fmtClock(t ? (t.running ? t.end - Date.now() : t.left) : s.timer_minutes * 60000)}</span>
+          <button class="btn ${t && t.running ? '' : 'primary'}" data-act="timer">${t && t.running ? 'Pause' : t ? 'Resume' : `Start ${fmtMins(s.timer_minutes)} timer`}</button>
+          ${t ? '<button class="btn small" data-act="reset">Reset</button>' : ''}</div>` : '';
+      body = `<div class="small muted">Step ${idx + 1} of ${steps.length}</div>
+        <p class="cook-step">${esc(s.body)}</p>
+        ${timerHtml}
+        <div class="grid2"><button class="btn" data-act="back">Back</button><button class="btn primary" data-act="next">${idx === steps.length - 1 ? 'Finish' : 'Next step'}</button></div>`;
+    } else {
+      body = `<h2>Done. Into containers it goes.</h2>
+        <label>Cooked batch weight (g), optional <input id="doneG" type="number" inputmode="numeric" min="0"></label>
+        <p class="small muted" id="doneEach">Split into ${fmtQty(portions)} containers.</p>
+        <button class="btn primary block" data-act="fridge">Put ${fmtQty(portions)} portions in the fridge</button>
+        <button class="btn block" data-act="back">Back to the steps</button>`;
+    }
+    const running = Object.entries(timers).filter(([i, t]) => t.running && Number(i) !== idx);
+    openSheet(`${sheetHead(r.name)}
+      ${running.length ? `<div class="timers">${running.map(([i, t]) => `<button class="pill" data-goto="${i}">Step ${Number(i) + 1} · <span class="num" data-clock="${i}">${fmtClock(t.end - Date.now())}</span></button>`).join('')}</div>` : ''}
+      ${body}`, () => { clearInterval(tick); keepAwake(false); });
+    sheetBody.classList.add('full');
+    const doneG = document.getElementById('doneG');
+    if (doneG) doneG.oninput = () => { const g = Number(doneG.value); document.getElementById('doneEach').textContent = g > 0 ? `${Math.round(g / portions)} g in each of ${fmtQty(portions)} containers.` : `Split into ${fmtQty(portions)} containers.`; };
+    sheetBody.onclick = async (e) => {
+      const go = e.target.closest('[data-goto]');
+      if (go) { idx = Number(go.dataset.goto); return draw(); }
+      const a = e.target.closest('[data-act]');
+      if (!a) return;
+      const t = timers[idx];
+      switch (a.dataset.act) {
+        case 'next': idx = Math.min(steps.length, idx + 1); return draw();
+        case 'back': idx = Math.max(-1, idx - 1); return draw();
+        case 'timer':
+          if (!t) timers[idx] = { end: Date.now() + steps[idx].timer_minutes * 60000, running: true };
+          else if (t.running) { t.left = t.end - Date.now(); t.running = false; }
+          else { t.end = Date.now() + t.left; t.running = true; }
+          return draw();
+        case 'reset': delete timers[idx]; return draw();
+        case 'fridge': {
+          const g = Number((document.getElementById('doneG') || {}).value);
+          try {
+            await api('fridge.cook', { recipe_id: r.id, portions, grams_per_portion: g > 0 ? Math.round(g / portions) : null });
+            closeSheet();
+            toast(`${fmtQty(portions)} portions in the fridge`);
+            if (location.hash === '' || location.hash === '#list') route();
+          } catch (er) { fail(er); }
+          return;
+        }
+        default:
+      }
+    };
+  };
+
+  keepAwake(true);
+  draw();
+  tick = setInterval(() => {
+    for (const [i, t] of Object.entries(timers)) {
+      if (!t.running) continue;
+      const left = t.end - Date.now();
+      if (left <= 0) {
+        t.running = false; t.left = 0;
+        beep();
+        toast(`Timer done: step ${Number(i) + 1}`);
+        if (!sheet.hidden) draw();
+        continue;
+      }
+      const el = Number(i) === idx ? document.getElementById('clock') : sheetBody.querySelector(`[data-clock="${i}"]`);
+      if (el) el.textContent = fmtClock(left);
+    }
+  }, 500);
+}
+
+/* ---------- recipe editor ---------- */
 function recipeEditor(r) {
-  let rows = r.items.map((i) => ({ product_id: i.product_id, amount: i.amount }));
+  let rows = r.items.map((i) => ({ product_id: i.product_id, amount: i.amount, note: i.note || '' }));
+  let steps = (r.steps && r.steps.length ? r.steps : recipeSteps(r)).map((s) => ({ body: s.body, timer_minutes: s.timer_minutes }));
+  const notes = r.steps && r.steps.length ? (r.instructions || '') : '';
   const prodOptions = (sel) => `<option value="">Choose product…</option>` + S.products.map((p) =>
     `<option value="${p.id}" ${p.id === Number(sel) ? 'selected' : ''}>${esc(p.name)}${p.brand ? ` (${esc(p.brand)})` : ''}</option>`).join('');
 
   openSheet(`${sheetHead(r.id ? 'Edit recipe' : 'New recipe')}
     <form class="stack" id="rForm">
       <label>Name <input name="name" required value="${esc(r.name)}" placeholder="Chicken & rice prep"></label>
-      <label>Servings it makes <input name="servings" type="number" min="1" step="1" value="${r.servings}"></label>
+      <div class="grid3">
+        <label>Portions <input name="servings" type="number" inputmode="numeric" min="1" step="1" value="${r.servings}"></label>
+        <label>Prep (min) <input name="prep_minutes" type="number" inputmode="numeric" min="0" value="${r.prep_minutes ?? ''}"></label>
+        <label>Cook (min) <input name="cook_minutes" type="number" inputmode="numeric" min="0" value="${r.cook_minutes ?? ''}"></label>
+      </div>
       <fieldset><legend>Ingredients (amount in the product's unit)</legend>
         <div id="ingRows" class="stack"></div>
         <button type="button" class="btn small" data-act="add-ing">＋ Ingredient</button>
         ${S.products.length ? '' : '<p class="small warn-text">Add products first. Ingredients are picked from your products.</p>'}
       </fieldset>
       <div class="card stack" id="rSummary"></div>
-      <label>Method / notes <textarea name="instructions" placeholder="Cook rice, bake chicken 25 min at 200°C…">${esc(r.instructions || '')}</textarea></label>
+      <fieldset><legend>Method</legend>
+        <div id="stepRows" class="stack"></div>
+        <button type="button" class="btn small" data-act="add-step">＋ Step</button>
+      </fieldset>
+      <label>Notes <textarea name="instructions" placeholder="Storage, swaps, what worked…">${esc(notes)}</textarea></label>
       <button class="btn primary block">Save recipe</button>
-      ${r.id ? `<button type="button" class="btn block" data-act="plan">Add to meal plan</button>
-        <button type="button" class="btn danger block" data-act="delete">Delete recipe</button>` : ''}
+      ${r.id ? '<button type="button" class="btn danger block" data-act="delete">Delete recipe</button>' : ''}
     </form>`);
   const form = document.getElementById('rForm');
   const box = document.getElementById('ingRows');
+  const stepBox = document.getElementById('stepRows');
 
   const drawRows = () => {
     box.innerHTML = rows.map((row, i) => {
       const p = S.products.find((x) => x.id === Number(row.product_id));
-      return `<div class="ing-row" data-i="${i}">
-        <select data-f="product_id">${prodOptions(row.product_id)}</select>
-        <input data-f="amount" type="number" inputmode="decimal" step="0.001" min="0" value="${row.amount ?? ''}" placeholder="${p ? p.unit : 'qty'}" aria-label="Amount">
-        <span class="small muted">${p ? (p.unit === 'each' ? 'items' : p.unit) : ''}</span>
-        <button type="button" class="icon-btn" data-act="rm-ing" aria-label="Remove">✕</button>
+      return `<div class="ing" data-i="${i}">
+        <select data-f="product_id" aria-label="Product">${prodOptions(row.product_id)}</select>
+        <div class="ing-row">
+          <input data-f="amount" type="number" inputmode="decimal" step="0.001" min="0" value="${row.amount ?? ''}" placeholder="${p ? p.unit : 'qty'}" aria-label="Amount">
+          <span class="small muted">${p ? (p.unit === 'each' ? 'items' : p.unit) : ''}</span>
+          <input data-f="note" value="${esc(row.note)}" placeholder="note, e.g. diced" aria-label="Note">
+          <button type="button" class="icon-btn" data-act="rm-ing" aria-label="Remove ingredient">✕</button>
+        </div>
       </div>`;
     }).join('') || '<p class="muted small">No ingredients yet.</p>';
     summary();
   };
+  const drawSteps = () => {
+    stepBox.innerHTML = steps.map((s, i) => `<div class="step-row" data-s="${i}">
+        <span class="step-num">${i + 1}</span>
+        <textarea data-f="body" rows="2" placeholder="What to do">${esc(s.body)}</textarea>
+        <div class="step-tools">
+          <input data-f="timer_minutes" type="number" inputmode="numeric" min="0" value="${s.timer_minutes ?? ''}" placeholder="—" aria-label="Timer minutes">
+          <span class="small muted grow">min timer</span>
+          <button type="button" class="icon-btn" data-act="up" aria-label="Move step up" ${i ? '' : 'disabled'}>↑</button>
+          <button type="button" class="icon-btn" data-act="rm-step" aria-label="Remove step">✕</button>
+        </div>
+      </div>`).join('') || '<p class="muted small">No steps yet. Add one per action: "Bake chicken 25 min at 200 °C".</p>';
+  };
   const summary = () => {
     const servings = Math.max(1, Number(form.servings.value) || 1);
-    let cost = 0; let missing = 0;
-    const lines = rows.map((row) => {
-      const p = S.products.find((x) => x.id === Number(row.product_id));
-      if (!p || !row.amount) return '';
-      const pr = priceAt(p.prices, null).price;
-      const c = pr === null ? null : (row.amount / p.pack_size) * pr;
-      if (c === null) missing++; else cost += c;
-      return `<div class="row small"><span class="grow">${fmtQty(row.amount)} ${p.unit === 'each' ? '×' : p.unit} ${esc(p.name)}</span><span class="num">${money(c)}</span></div>`;
-    }).join('');
-    document.getElementById('rSummary').innerHTML = `${lines}
-      <div class="row"><b class="grow">Cost (cheapest prices)</b><b class="num">${money(cost)}</b></div>
-      <div class="row small muted"><span class="grow">Per serving</span><span class="num">${money(cost / servings)}</span></div>
-      ${missing ? `<div class="small warn-text">${missing} ingredient${missing > 1 ? 's' : ''} without a price</div>` : ''}`;
+    const tmp = { servings, items: rows.filter((x) => x.product_id && x.amount).map((x) => {
+      const p = S.products.find((pp) => pp.id === Number(x.product_id));
+      return { product_id: p.id, name: p.name, unit: p.unit, pack_size: p.pack_size, amount: Number(x.amount) };
+    }) };
+    const sc = scaleRecipe(tmp, servings);
+    document.getElementById('rSummary').innerHTML = `
+      <div class="row between"><b>Batch cost</b><b class="num">${money(sc.used)}</b></div>
+      <div class="row between small muted"><span>Per portion</span><span class="num">${money(sc.perPortion)}</span></div>
+      ${sc.missing ? `<div class="small warn-text">${sc.missing} ingredient${sc.missing > 1 ? 's' : ''} without a price</div>` : ''}`;
   };
   drawRows();
+  drawSteps();
 
   sheetBody.oninput = (e) => {
-    const rowEl = e.target.closest('.ing-row');
-    if (rowEl) rows[Number(rowEl.dataset.i)][e.target.dataset.f] = e.target.value === '' ? null : Number(e.target.value);
-    if (rowEl && e.target.dataset.f === 'product_id') drawRows(); else summary();
+    const ing = e.target.closest('.ing');
+    const st = e.target.closest('.step-row');
+    if (ing) {
+      const f = e.target.dataset.f;
+      rows[Number(ing.dataset.i)][f] = f === 'note' ? e.target.value : (e.target.value === '' ? null : Number(e.target.value));
+      if (f === 'product_id') drawRows(); else summary();
+    } else if (st) {
+      const f = e.target.dataset.f;
+      steps[Number(st.dataset.s)][f] = f === 'body' ? e.target.value : (e.target.value === '' ? null : Number(e.target.value));
+    } else summary();
   };
-  sheetBody.onchange = sheetBody.oninput;
+  sheetBody.onchange = (e) => { if (e.target.dataset.f === 'product_id') sheetBody.oninput(e); };
   sheetBody.onclick = async (e) => {
     const act = e.target.closest('[data-act]');
     if (!act) return;
-    if (act.dataset.act === 'add-ing') { rows.push({ product_id: null, amount: null }); drawRows(); return; }
-    if (act.dataset.act === 'rm-ing') { rows.splice(Number(act.closest('.ing-row').dataset.i), 1); drawRows(); return; }
-    if (act.dataset.act === 'plan') { closeSheet(); return planAddSheet(iso(new Date()), r.id); }
-    if (act.dataset.act === 'delete') {
-      if (!confirm(`Delete ${r.name}? It will also come off the meal plan.`)) return;
-      try { await api('recipes.delete', { id: r.id }); closeSheet(); route(); } catch (er) { fail(er); }
+    const si = act.closest('.step-row') ? Number(act.closest('.step-row').dataset.s) : null;
+    switch (act.dataset.act) {
+      case 'add-ing': rows.push({ product_id: null, amount: null, note: '' }); return drawRows();
+      case 'rm-ing': rows.splice(Number(act.closest('.ing').dataset.i), 1); return drawRows();
+      case 'add-step': steps.push({ body: '', timer_minutes: null }); drawSteps(); stepBox.querySelector('.step-row:last-child textarea').focus(); return;
+      case 'rm-step': steps.splice(si, 1); return drawSteps();
+      case 'up': if (si > 0) { [steps[si - 1], steps[si]] = [steps[si], steps[si - 1]]; drawSteps(); } return;
+      case 'delete':
+        if (!confirm(`Delete ${r.name}? It also comes off the meal plan.`)) return;
+        try { await api('recipes.delete', { id: r.id }); closeSheet(); route(); } catch (er) { fail(er); }
+        return;
+      default:
     }
   };
   sheetBody.onsubmit = async (e) => {
     e.preventDefault();
     try {
-      await api('recipes.save', {
-        id: r.id, name: form.name.value, servings: form.servings.value, instructions: form.instructions.value,
+      const { recipe } = await api('recipes.save', {
+        id: r.id, name: form.name.value, servings: form.servings.value,
+        prep_minutes: form.prep_minutes.value, cook_minutes: form.cook_minutes.value,
+        instructions: form.instructions.value,
         items: rows.filter((x) => x.product_id && x.amount),
+        steps: steps.filter((s) => s.body && s.body.trim()),
       });
-      closeSheet(); toast('Recipe saved'); route();
+      closeSheet();
+      toast('Recipe saved');
+      if (location.hash === '#recipes') await route();
+      recipeView(recipe);
     } catch (er) { fail(er); }
   };
 }
@@ -862,9 +1260,18 @@ async function renderBudget() {
       ${left < 0 ? `<p class="small bad-text">Over budget by ${money(-left)}.</p>` : ''}
     </section>
 
+    <section class="card stack">
+      <div class="row between"><h2>Takeaways</h2><button class="btn small" data-act="log-ta">＋ Log</button></div>
+      <div class="grid2 right">
+        <div><div class="small muted">This month</div><b class="num ${b.eating_out > b.takeaway_weekly * 52 / 12 ? 'bad-text' : ''}">${money(b.eating_out)}</b></div>
+        <div><div class="small muted">Allowance a month</div><b class="num">${money(b.takeaway_weekly * 52 / 12)}</b></div>
+      </div>
+      <p class="small muted">Kept separate from groceries, so the grocery budget stays honest.</p>
+    </section>
+
     <section class="card flush">
       <div class="section-head"><h2 class="grow">Shops this month</h2><button class="btn small" data-act="add-trip">＋ Log spend</button></div>
-      <ul class="list">${b.trips.map((t) => `<li><div class="grow"><div class="name">${esc(t.store || 'Other')}</div>
+      <ul class="list">${b.trips.map((t) => `<li><div class="grow"><div class="name">${esc(t.store || (t.kind === 'eating_out' ? (t.note || 'Takeaway') : 'Other'))}${t.kind === 'eating_out' ? '<span class="tag warn">takeaway</span>' : ''}</div>
         <div class="sub">${esc(t.trip_date)}${t.who ? ` · ${esc(t.who)}` : ''}${t.note ? ` · ${esc(t.note)}` : ''}</div></div>
         <b class="num">${money(t.total)}</b><button class="icon-btn" data-del-trip="${t.id}" aria-label="Delete">✕</button></li>`).join('') || '<li class="empty">No shops logged yet.</li>'}</ul>
     </section>
@@ -872,6 +1279,7 @@ async function renderBudget() {
     <section class="card stack">
       <h2>Settings</h2>
       <form class="row" id="budgetForm"><label class="grow">Monthly grocery budget (R) <input name="monthly_budget" type="number" inputmode="decimal" step="0.01" min="0" value="${b.budget}"></label><button class="btn">Save</button></form>
+      <form class="row" id="taWeekly"><label class="grow">Weekly takeaway allowance (R) <input name="weekly" type="number" inputmode="decimal" step="0.01" min="0" value="${b.takeaway_weekly}"></label><button class="btn">Save</button></form>
       <div>
         <div class="small muted">Shops</div>
         <ul class="list">${S.stores.map((s) => `<li><span class="grow">${esc(s.name)}</span><button class="btn small" data-rename="${s.id}">Rename</button><button class="icon-btn" data-del-store="${s.id}" aria-label="Delete">✕</button></li>`).join('')}</ul>
@@ -888,6 +1296,7 @@ async function renderBudget() {
     e.preventDefault();
     try {
       if (e.target.id === 'budgetForm') { await api('budget.set', { monthly_budget: e.target.monthly_budget.value }); S.budget = Number(e.target.monthly_budget.value); toast('Budget saved'); }
+      if (e.target.id === 'taWeekly') { await api('takeaway.set', { weekly: e.target.weekly.value }); toast('Takeaway allowance saved'); }
       if (e.target.id === 'storeForm') { await api('stores.add', { name: e.target.name.value }); await refreshStores(); }
       renderBudget();
     } catch (er) { fail(er); }
@@ -910,6 +1319,7 @@ async function renderBudget() {
         await api('stores.rename', { id: t.dataset.rename, name }); await refreshStores(); return renderBudget();
       }
       if (t.dataset.act === 'add-trip') return tripSheet();
+      if (t.dataset.act === 'log-ta') return takeawaySheet(() => renderBudget());
       if (t.dataset.act === 'logout') { await api('logout'); location.reload(); }
       if (t.dataset.act === 'password') return passwordSheet();
     } catch (er) { fail(er); }

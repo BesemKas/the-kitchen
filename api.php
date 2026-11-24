@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 require __DIR__ . '/app/bootstrap.php';
+require __DIR__ . '/app/migrations.php';
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
@@ -166,6 +167,13 @@ function recipes_with_costs(?int $onlyId = null): array
     foreach ($items as $it) {
         $byRecipe[(int)$it['recipe_id']][] = $it;
     }
+    $stepsByRecipe = [];
+    foreach (q('SELECT recipe_id, body, timer_minutes FROM recipe_steps WHERE recipe_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ') ORDER BY sort, id', $ids) as $st) {
+        $stepsByRecipe[(int)$st['recipe_id']][] = [
+            'body' => $st['body'],
+            'timer_minutes' => $st['timer_minutes'] === null ? null : (int)$st['timer_minutes'],
+        ];
+    }
     $result = [];
     foreach ($recipes as $r) {
         $cost = 0.0;
@@ -201,6 +209,7 @@ function recipes_with_costs(?int $onlyId = null): array
                 'unit' => $it['unit'],
                 'pack_size' => (float)$it['pack_size'],
                 'amount' => $amount,
+                'note' => $it['note'],
                 'cost' => $line,
             ];
         }
@@ -214,7 +223,10 @@ function recipes_with_costs(?int $onlyId = null): array
             'name' => $r['name'],
             'servings' => $servings,
             'instructions' => $r['instructions'],
+            'prep_minutes' => $r['prep_minutes'] === null ? null : (int)$r['prep_minutes'],
+            'cook_minutes' => $r['cook_minutes'] === null ? null : (int)$r['cook_minutes'],
             'items' => $list,
+            'steps' => $stepsByRecipe[(int)$r['id']] ?? [],
             'cost' => round($cost, 2),
             'cost_per_serving' => round($cost / $servings, 2),
             'missing_prices' => $missing,
@@ -225,9 +237,53 @@ function recipes_with_costs(?int $onlyId = null): array
     return $result;
 }
 
-function month_spent(string $month): float
+function month_spent(string $month, string $kind = 'groceries'): float
 {
-    return (float)q("SELECT COALESCE(SUM(total), 0) FROM trips WHERE DATE_FORMAT(trip_date, '%Y-%m') = ?", [$month])->fetchColumn();
+    return (float)q("SELECT COALESCE(SUM(total), 0) FROM trips WHERE kind = ? AND DATE_FORMAT(trip_date, '%Y-%m') = ?", [$kind, $month])->fetchColumn();
+}
+
+/** Takeaway spend for the Monday-to-Sunday week containing $date, against the weekly allowance. */
+function takeaway_week(?string $date = null): array
+{
+    $d = new DateTimeImmutable($date ?? 'today');
+    $monday = $d->modify('-' . ((int)$d->format('N') - 1) . ' days');
+    $sunday = $monday->modify('+6 days');
+    $rows = q("SELECT id, trip_date, total, note FROM trips WHERE kind = 'eating_out' AND trip_date BETWEEN ? AND ? ORDER BY trip_date DESC, id DESC",
+        [$monday->format('Y-m-d'), $sunday->format('Y-m-d')])->fetchAll();
+    $spent = 0.0;
+    foreach ($rows as &$r) {
+        $r['id'] = (int)$r['id'];
+        $r['total'] = (float)$r['total'];
+        $spent += $r['total'];
+    }
+    unset($r);
+    return [
+        'weekly' => (float)setting('takeaway_weekly', '100'),
+        'spent' => round($spent, 2),
+        'from' => $monday->format('Y-m-d'),
+        'to' => $sunday->format('Y-m-d'),
+        'items' => $rows,
+    ];
+}
+
+function fridge_list(): array
+{
+    $rows = q('SELECT f.*, r.servings FROM fridge f LEFT JOIN recipes r ON r.id = f.recipe_id WHERE f.portions > 0 ORDER BY f.cooked_on, f.id')->fetchAll();
+    $out = [];
+    $today = new DateTimeImmutable('today');
+    foreach ($rows as $r) {
+        $out[] = [
+            'id' => (int)$r['id'],
+            'recipe_id' => $r['recipe_id'] === null ? null : (int)$r['recipe_id'],
+            'name' => $r['name'],
+            'portions' => (float)$r['portions'],
+            'grams_per_portion' => $r['grams_per_portion'] === null ? null : (int)$r['grams_per_portion'],
+            'cost_per_portion' => $r['cost_per_portion'] === null ? null : (float)$r['cost_per_portion'],
+            'cooked_on' => $r['cooked_on'],
+            'age_days' => (int)$today->diff(new DateTimeImmutable($r['cooked_on']))->days,
+        ];
+    }
+    return $out;
 }
 
 function off_lookup(string $barcode): ?array
@@ -328,6 +384,7 @@ if (!is_array($in)) {
 }
 $uid = (int)$user['id'];
 $action = (string)($in['action'] ?? '');
+run_migrations();
 
 try {
     switch ($action) {
@@ -340,6 +397,7 @@ try {
                 'stores' => q('SELECT id, name FROM stores ORDER BY name')->fetchAll(),
                 'budget' => (float)setting('monthly_budget', '0'),
                 'spent' => month_spent($month),
+                'takeaway_weekly' => (float)setting('takeaway_weekly', '100'),
                 'month' => $month,
                 'currency' => config('currency', 'R'),
             ]);
@@ -453,7 +511,15 @@ try {
                 $i['prices'] = (object)($i['product_id'] ? ($prices[$i['product_id']] ?? []) : []);
             }
             unset($i);
-            out(['items' => $items, 'spent' => month_spent(date('Y-m')), 'budget' => (float)setting('monthly_budget', '0')]);
+            $lastShop = q("SELECT MAX(trip_date) FROM trips WHERE kind = 'groceries'")->fetchColumn();
+            out([
+                'items' => $items,
+                'spent' => month_spent(date('Y-m')),
+                'budget' => (float)setting('monthly_budget', '0'),
+                'takeaway' => takeaway_week(),
+                'fridge' => fridge_list(),
+                'last_shop' => $lastShop ?: null,
+            ]);
 
         case 'list.add':
             $pid = int_in($in, 'product_id', false);
@@ -536,22 +602,36 @@ try {
             $id = int_in($in, 'id', false);
             $name = str_in($in, 'name', 120, true);
             $servings = (int)num_in($in, 'servings', 1, 1, 100);
-            $instructions = isset($in['instructions']) ? mb_substr((string)$in['instructions'], 0, 20000) : null;
+            $instructions = isset($in['instructions']) && trim((string)$in['instructions']) !== '' ? mb_substr((string)$in['instructions'], 0, 20000) : null;
+            $prep = num_in($in, 'prep_minutes', null, 0, 10000);
+            $cook = num_in($in, 'cook_minutes', null, 0, 10000);
+            $vals = [$name, $servings, $instructions, $prep === null ? null : (int)$prep, $cook === null ? null : (int)$cook];
             db()->beginTransaction();
             if ($id) {
-                q('UPDATE recipes SET name = ?, servings = ?, instructions = ? WHERE id = ?', [$name, $servings, $instructions, $id]);
+                q('UPDATE recipes SET name = ?, servings = ?, instructions = ?, prep_minutes = ?, cook_minutes = ? WHERE id = ?', [...$vals, $id]);
                 q('DELETE FROM recipe_items WHERE recipe_id = ?', [$id]);
+                q('DELETE FROM recipe_steps WHERE recipe_id = ?', [$id]);
             } else {
-                q('INSERT INTO recipes (name, servings, instructions) VALUES (?, ?, ?)', [$name, $servings, $instructions]);
+                q('INSERT INTO recipes (name, servings, instructions, prep_minutes, cook_minutes) VALUES (?, ?, ?, ?, ?)', $vals);
                 $id = (int)db()->lastInsertId();
             }
             foreach (array_values((array)($in['items'] ?? [])) as $i => $it) {
-                $pid = int_in((array)$it, 'product_id');
-                $amount = num_in((array)$it, 'amount', null, 0.001, 100000);
+                $it = (array)$it;
+                $pid = int_in($it, 'product_id');
+                $amount = num_in($it, 'amount', null, 0.001, 100000);
                 if ($amount === null) {
                     continue;
                 }
-                q('INSERT INTO recipe_items (recipe_id, product_id, amount, sort) VALUES (?, ?, ?, ?)', [$id, $pid, $amount, $i]);
+                q('INSERT INTO recipe_items (recipe_id, product_id, amount, note, sort) VALUES (?, ?, ?, ?, ?)', [$id, $pid, $amount, str_in($it, 'note', 120), $i]);
+            }
+            foreach (array_values((array)($in['steps'] ?? [])) as $i => $st) {
+                $st = (array)$st;
+                $body = isset($st['body']) ? trim(mb_substr((string)$st['body'], 0, 4000)) : '';
+                if ($body === '') {
+                    continue;
+                }
+                $timer = num_in($st, 'timer_minutes', null, 0, 1440);
+                q('INSERT INTO recipe_steps (recipe_id, sort, body, timer_minutes) VALUES (?, ?, ?, ?)', [$id, $i, $body, $timer ? (int)$timer : null]);
             }
             db()->commit();
             out(['recipe' => recipes_with_costs($id)[0]]);
@@ -559,6 +639,79 @@ try {
         case 'recipes.delete':
             q('DELETE FROM recipes WHERE id = ?', [int_in($in, 'id')]);
             out(['ok' => true]);
+
+        case 'recipes.to_list':
+            // add the packs needed for one batch of a recipe at a chosen number of portions
+            $rid = int_in($in, 'id');
+            $portions = num_in($in, 'portions', null, 0.25, 500) ?? fail('Missing portions');
+            $need = q('SELECT ri.product_id, p.name, p.pack_size, ri.amount * ? / r.servings amount
+                       FROM recipe_items ri JOIN recipes r ON r.id = ri.recipe_id JOIN products p ON p.id = ri.product_id
+                       WHERE r.id = ?', [$portions, $rid])->fetchAll();
+            $added = 0;
+            foreach ($need as $n) {
+                $packs = max(1, (int)ceil((float)$n['amount'] / max(0.001, (float)$n['pack_size']) - 1e-6));
+                $existing = q('SELECT id FROM list_items WHERE product_id = ? AND checked = 0 AND from_plan = 0 LIMIT 1', [$n['product_id']])->fetchColumn();
+                if ($existing) {
+                    q('UPDATE list_items SET qty = qty + ? WHERE id = ?', [$packs, $existing]);
+                } else {
+                    q('INSERT INTO list_items (product_id, name, qty, added_by) VALUES (?, ?, ?, ?)', [$n['product_id'], $n['name'], $packs, $uid]);
+                }
+                $added++;
+            }
+            out(['added' => $added]);
+
+        // ----- fridge (cooked portions) -----
+        case 'fridge.list':
+            out(['fridge' => fridge_list()]);
+
+        case 'fridge.cook':
+            $rid = int_in($in, 'recipe_id', false);
+            $name = str_in($in, 'name', 120);
+            $cpp = null;
+            if ($rid) {
+                $rec = recipes_with_costs($rid)[0] ?? fail('Recipe not found', 404);
+                $name = $rec['name'];
+                $cpp = $rec['missing_prices'] ? null : $rec['cost_per_serving'];
+            }
+            if ($name === null) {
+                fail('Pick a recipe or type a name');
+            }
+            $grams = num_in($in, 'grams_per_portion', null, 1, 100000);
+            q('INSERT INTO fridge (recipe_id, name, portions, grams_per_portion, cost_per_portion, cooked_on, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+                $rid, $name, num_in($in, 'portions', null, 0.25, 500) ?? fail('How many portions?'),
+                $grams === null ? null : (int)round($grams), $cpp, date_in($in, 'date', date('Y-m-d')), $uid,
+            ]);
+            out(['fridge' => fridge_list()]);
+
+        case 'fridge.eat':
+            q('UPDATE fridge SET portions = GREATEST(0, portions - ?) WHERE id = ?', [num_in($in, 'n', 1, 0.25, 500), int_in($in, 'id')]);
+            q('DELETE FROM fridge WHERE portions <= 0');
+            out(['fridge' => fridge_list()]);
+
+        case 'fridge.set':
+            q('UPDATE fridge SET portions = ? WHERE id = ?', [num_in($in, 'portions', null, 0, 500) ?? fail('Missing portions'), int_in($in, 'id')]);
+            q('DELETE FROM fridge WHERE portions <= 0');
+            out(['fridge' => fridge_list()]);
+
+        case 'fridge.delete':
+            q('DELETE FROM fridge WHERE id = ?', [int_in($in, 'id')]);
+            out(['fridge' => fridge_list()]);
+
+        // ----- takeaways -----
+        case 'takeaway.get':
+            out(['takeaway' => takeaway_week()]);
+
+        case 'takeaway.add':
+            q("INSERT INTO trips (trip_date, store_id, total, note, user_id, kind) VALUES (?, NULL, ?, ?, ?, 'eating_out')", [
+                date_in($in, 'date', date('Y-m-d')),
+                num_in($in, 'total', null, 0, 1e5) ?? fail('How much was it?'),
+                str_in($in, 'note', 200), $uid,
+            ]);
+            out(['takeaway' => takeaway_week()]);
+
+        case 'takeaway.set':
+            set_setting('takeaway_weekly', number_format(num_in($in, 'weekly', 0, 0, 1e6), 2, '.', ''));
+            out(['takeaway' => takeaway_week()]);
 
         // ----- meal plan -----
         case 'plan.get':
@@ -636,14 +789,21 @@ try {
         // ----- budget / trips -----
         case 'budget.get':
             $month = preg_match('/^\d{4}-\d{2}$/', (string)($in['month'] ?? '')) ? $in['month'] : date('Y-m');
-            $trips = q('SELECT t.id, t.trip_date, t.total, t.note, s.name store, u.display_name who
+            $trips = q('SELECT t.id, t.trip_date, t.total, t.note, t.kind, s.name store, u.display_name who
                         FROM trips t LEFT JOIN stores s ON s.id = t.store_id LEFT JOIN users u ON u.id = t.user_id
                         WHERE DATE_FORMAT(t.trip_date, \'%Y-%m\') = ? ORDER BY t.trip_date DESC, t.id DESC', [$month])->fetchAll();
             foreach ($trips as &$t) {
                 $t['total'] = (float)$t['total'];
             }
             unset($t);
-            out(['month' => $month, 'budget' => (float)setting('monthly_budget', '0'), 'spent' => month_spent($month), 'trips' => $trips]);
+            out([
+                'month' => $month,
+                'budget' => (float)setting('monthly_budget', '0'),
+                'spent' => month_spent($month),
+                'eating_out' => month_spent($month, 'eating_out'),
+                'takeaway_weekly' => (float)setting('takeaway_weekly', '100'),
+                'trips' => $trips,
+            ]);
 
         case 'budget.set':
             set_setting('monthly_budget', number_format(num_in($in, 'monthly_budget', 0, 0, 1e7), 2, '.', ''));
