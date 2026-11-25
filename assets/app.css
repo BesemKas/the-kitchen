@@ -554,3 +554,8 @@ button.pick { display: flex; width: 100%; text-align: left; padding: 12px 14px; 
 .scan-guide { position: absolute; left: 12%; right: 12%; top: 32%; bottom: 32%; border: 2px solid var(--accent); border-radius: 12px; box-shadow: 0 0 0 999px rgb(0 0 0 / .35); pointer-events: none; }
 .scan-torch { position: absolute; right: 10px; bottom: 10px; border: 1px solid var(--line-2); border-radius: 999px; padding: 8px 14px; background: rgb(0 0 0 / .55); color: #fff; font: 600 13px Inter, system-ui, sans-serif; cursor: pointer; }
 .scan-torch.on { background: var(--accent); color: var(--accent-ink); }
+
+/* shops on the Me page: name and branch on one line, buttons under it */
+.list li.shop-row { flex-wrap: wrap; row-gap: 6px; }
+.list li.shop-row > .grow { flex: 1 1 100%; min-width: 0; }
+.list li.shop-row > .btn { flex: 1 1 auto; }

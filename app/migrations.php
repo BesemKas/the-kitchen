@@ -308,6 +308,20 @@ const MIGRATIONS = [
     16 => [
         "ALTER TABLE products ADD COLUMN source VARCHAR(8) NOT NULL DEFAULT 'user', ADD INDEX (source)",
     ],
+    // Branches: shops at the same branch (chain + branch name) see each other's recent prices, without names.
+    // Prices are never shared across branches, because they rarely match.
+    17 => [
+        "CREATE TABLE branches (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            chain VARCHAR(40) NOT NULL,
+            name VARCHAR(80) NOT NULL,
+            name_key VARCHAR(80) NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY chain_name (chain, name_key)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "ALTER TABLE stores ADD COLUMN branch_id INT UNSIGNED NULL, ADD FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL",
+        "ALTER TABLE prices ADD INDEX store_time (store_id, recorded_at)",
+    ],
 ];
 
 function schema_version(): int
