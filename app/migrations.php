@@ -239,6 +239,38 @@ const MIGRATIONS = [
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
         ) ENGINE=InnoDB",
     ],
+    // pilot numbers: which days people used the app, what they scanned, and what they told us
+    13 => [
+        "CREATE TABLE IF NOT EXISTS user_days (
+            user_id INT UNSIGNED NOT NULL,
+            day DATE NOT NULL,
+            PRIMARY KEY (user_id, day),
+            INDEX (day),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB",
+        "INSERT IGNORE INTO user_days (user_id, day) SELECT id, DATE(last_seen) FROM users WHERE last_seen IS NOT NULL AND is_kitchen = 0",
+        "CREATE TABLE IF NOT EXISTS scan_log (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id INT UNSIGNED NULL,
+            kind VARCHAR(10) NOT NULL DEFAULT 'barcode',
+            result VARCHAR(10) NOT NULL,
+            at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX (at),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB",
+        "CREATE TABLE IF NOT EXISTS feedback (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id INT UNSIGNED NULL,
+            kind VARCHAR(10) NOT NULL DEFAULT 'note',
+            used TEXT NULL,
+            annoyed TEXT NULL,
+            missing TEXT NULL,
+            note TEXT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX (created_at),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB",
+    ],
 ];
 
 function schema_version(): int
