@@ -140,6 +140,26 @@ const MIGRATIONS = [
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
     ],
+    9 => [
+        // per person: "always alert me" / "don't flag" for an E-number, a group (group:sweeteners) or a word (peanut)
+        "CREATE TABLE ingredient_alerts (
+            user_id INT UNSIGNED NOT NULL,
+            code VARCHAR(40) NOT NULL,
+            mode VARCHAR(6) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, code),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        // cooked portions can live in the freezer; moved_on is when they last moved (frozen or thawed)
+        "ALTER TABLE fridge ADD COLUMN location VARCHAR(7) NOT NULL DEFAULT 'fridge', ADD COLUMN moved_on DATE NULL",
+        // budget runs from payday to payday; marked dates cover early (December) or moved paydays
+        "CREATE TABLE pay_dates (
+            user_id INT UNSIGNED NOT NULL,
+            paid_on DATE NOT NULL,
+            PRIMARY KEY (user_id, paid_on),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+    ],
 ];
 
 function schema_version(): int
