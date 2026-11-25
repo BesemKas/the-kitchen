@@ -227,7 +227,9 @@ function product_row(array $r, array $prices): array
     $r['best_price'] = best_price($prices[$r['id']] ?? []);
     $r['pantry'] = isset($r['pantry']) && $r['pantry'] !== null ? (float)$r['pantry'] : 0.0;
     $r['bought_count'] = (int)($r['bought_count'] ?? 0);
-    unset($r['created_at']);
+    $r['nova'] = isset($r['nova']) && $r['nova'] !== null ? (int)$r['nova'] : null;
+    $r['additives'] = !empty($r['additives']) ? explode(',', $r['additives']) : [];
+    unset($r['created_at'], $r['off_checked_at']);
     return $r;
 }
 
@@ -412,12 +414,117 @@ function fridge_list(): array
     return $out;
 }
 
+/** ['e330', 'E 211', ...] -> ['e211', 'e330'] (unique, lower case, max 40) */
+function clean_additives(array $list): array
+{
+    $out = [];
+    foreach ($list as $a) {
+        $a = strtolower(preg_replace('/\s+/', '', (string)$a));
+        if (preg_match('/^e\d{3,4}[a-z]?$/', $a)) {
+            $out[$a] = true;
+        }
+    }
+    $out = array_keys($out);
+    sort($out);
+    return array_slice($out, 0, 40);
+}
+
+/** E-numbers mentioned in an ingredient list. */
+function additives_in(?string $ingredients): array
+{
+    if (!$ingredients) {
+        return [];
+    }
+    preg_match_all('/\bE\s?-?\s?(\d{3,4}[a-z]?)\b/i', $ingredients, $m);
+    return clean_additives(array_map(fn($x) => 'e' . $x, $m[1]));
+}
+
+/** Store Open Food Facts health info on a product; fill nutrition only where it's still empty. */
+function apply_off(int $id, ?array $s): void
+{
+    if (!$s) {
+        q('UPDATE products SET off_checked_at = NOW() WHERE id = ?', [$id]);
+        return;
+    }
+    $cur = q('SELECT * FROM products WHERE id = ?', [$id])->fetch();
+    $set = ['off_checked_at = NOW()'];
+    $vals = [];
+    foreach (['nutriscore', 'nova'] as $k) {
+        if ($s[$k] !== null) { $set[] = "$k = ?"; $vals[] = $s[$k]; }
+    }
+    if ($s['additives']) { $set[] = 'additives = ?'; $vals[] = implode(',', $s['additives']); }
+    if ($s['ingredients'] && empty($cur['ingredients'])) { $set[] = 'ingredients = ?'; $vals[] = mb_substr($s['ingredients'], 0, 4000); }
+    if (!empty($s['has_nutrition']) && $cur['unit'] !== 'each') {
+        foreach (NUTRIENTS as $n) {
+            if ($cur[$n] === null && $s['nutrition'][$n] !== null) { $set[] = "$n = ?"; $vals[] = $s['nutrition'][$n]; }
+        }
+    }
+    q('UPDATE products SET ' . implode(', ', $set) . ' WHERE id = ?', [...$vals, $id]);
+}
+
+/** Read a nutrition label / ingredient list photo with Claude. Off unless anthropic_key is set in config.php. */
+function read_label(string $b64, string $mime): array
+{
+    $key = (string)config('anthropic_key', '');
+    if ($key === '' || !function_exists('curl_init')) {
+        fail('Label reading is switched off. Type the numbers from the photo instead.');
+    }
+    $prompt = <<<TXT
+    This photo shows a packaged food label from South Africa: a nutrition information table and/or an ingredients list.
+    Reply with only a JSON object, no other text:
+    {"column": "100g" | "100ml" | "serving" | null, "energy_kj": number|null, "protein_g": number|null, "carbs_g": number|null, "sugar_g": number|null, "fat_g": number|null, "satfat_g": number|null, "fibre_g": number|null, "sodium_mg": number|null, "ingredients": string|null}
+    Rules: use the per 100 g (or per 100 ml) column, never per serving; set "column" to the column you used.
+    Carbs means total (glycaemic) carbohydrate; sugar is "of which total sugar". If only kcal is given, energy_kj = kcal * 4.184.
+    If salt is given instead of sodium, sodium_mg = salt in g * 400. Sodium in g -> multiply by 1000 for mg.
+    ingredients: the ingredient list text exactly as printed, or null if not in the photo. Use null for anything you cannot read clearly. Never guess.
+    TXT;
+    $ch = curl_init((string)config('anthropic_url', 'https://api.anthropic.com/v1/messages'));
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_TIMEOUT => 45,
+        CURLOPT_CONNECTTIMEOUT => 8,
+        CURLOPT_HTTPHEADER => ['content-type: application/json', 'x-api-key: ' . $key, 'anthropic-version: 2023-06-01'],
+        CURLOPT_POSTFIELDS => json_encode([
+            'model' => (string)config('label_model', 'claude-haiku-5-5'),
+            'max_tokens' => 1500,
+            'messages' => [['role' => 'user', 'content' => [
+                ['type' => 'image', 'source' => ['type' => 'base64', 'media_type' => $mime, 'data' => $b64]],
+                ['type' => 'text', 'text' => $prompt],
+            ]]],
+        ]),
+    ]);
+    $body = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    $resp = is_string($body) ? json_decode($body, true) : null;
+    if ($code !== 200 || !is_array($resp)) {
+        fail('Could not read the label (' . ($resp['error']['message'] ?? "HTTP $code") . ')', 502);
+    }
+    $text = '';
+    foreach ((array)($resp['content'] ?? []) as $c) {
+        if (($c['type'] ?? '') === 'text') { $text .= $c['text']; }
+    }
+    if (!preg_match('/\{.*\}/s', $text, $m) || !is_array($j = json_decode($m[0], true))) {
+        fail('Could not read the label. Try a sharper, straight-on photo.', 502);
+    }
+    $limits = ['energy_kj' => 4000, 'protein_g' => 100, 'carbs_g' => 100, 'sugar_g' => 100, 'fat_g' => 100, 'satfat_g' => 100, 'fibre_g' => 100, 'sodium_mg' => 40000];
+    $n = [];
+    foreach ($limits as $k => $max) {
+        $v = $j[$k] ?? null;
+        $n[$k] = is_numeric($v) && $v >= 0 && $v <= $max ? round((float)$v, 2) : null;
+    }
+    $col = in_array($j['column'] ?? null, ['100g', '100ml', 'serving'], true) ? $j['column'] : null;
+    $ing = is_string($j['ingredients'] ?? null) ? mb_substr(trim($j['ingredients']), 0, 4000) : null;
+    return ['nutrition' => $n, 'column' => $col, 'ingredients' => $ing ?: null, 'additives' => additives_in($ing)];
+}
+
 function off_lookup(string $barcode): ?array
 {
     if (!function_exists('curl_init')) {
         return null;
     }
-    $fields = 'product_name,brands,quantity,product_quantity,product_quantity_unit,nutriments';
+    $fields = 'product_name,brands,quantity,product_quantity,product_quantity_unit,nutriments,nutriscore_grade,nova_group,additives_tags,ingredients_text_en,ingredients_text';
     $ch = curl_init('https://world.openfoodfacts.org/api/v2/product/' . rawurlencode($barcode) . '.json?fields=' . $fields);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -463,7 +570,15 @@ function off_parse(array $data): ?array
         // per-100g values don't apply to an item-priced product
         $nutrition = array_fill_keys(NUTRIENTS, null);
     }
-    return [
+    $grade = strtolower((string)($p['nutriscore_grade'] ?? ''));
+    $nova = (int)($p['nova_group'] ?? 0);
+    $health = [
+        'nutriscore' => in_array($grade, ['a', 'b', 'c', 'd', 'e'], true) ? $grade : null,
+        'nova' => $nova >= 1 && $nova <= 4 ? $nova : null,
+        'additives' => clean_additives(array_map(fn($t) => preg_replace('/^[a-z]{2}:/', '', (string)$t), (array)($p['additives_tags'] ?? []))),
+        'ingredients' => trim((string)($p['ingredients_text_en'] ?? '')) ?: (trim((string)($p['ingredients_text'] ?? '')) ?: null),
+    ];
+    return $health + [
         'name' => trim((string)($p['product_name'] ?? '')) ?: null,
         'brand' => trim(explode(',', (string)($p['brands'] ?? ''))[0]) ?: null,
         'pack_size' => $size,
@@ -549,6 +664,7 @@ try {
                 'budget' => (float)user_setting('monthly_budget', '0'),
                 'spent' => month_spent($month),
                 'takeaway_weekly' => (float)user_setting('takeaway_weekly', '100'),
+                'label_reader' => (string)config('anthropic_key', '') !== '',
                 'month' => $month,
                 'currency' => config('currency', 'R'),
             ]);
@@ -577,7 +693,16 @@ try {
         case 'products.list':
             $prices = latest_prices();
             $rows = array_map(fn($r) => product_row($r, $prices), q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? ORDER BY p.name', [$uid])->fetchAll());
-            out(['products' => $rows, 'aisle_order' => json_decode(user_setting('aisle_order', DEFAULT_AISLES), true) ?: []]);
+            $photos = [];
+            foreach (q('SELECT id, product_id, kind FROM product_photos ORDER BY id DESC') as $ph) {
+                $photos[(int)$ph['product_id']][] = ['id' => (int)$ph['id'], 'kind' => $ph['kind']];
+            }
+            foreach ($rows as &$r) {
+                $r['photos'] = $photos[$r['id']] ?? [];
+            }
+            unset($r);
+            $offPending = (int)q("SELECT COUNT(*) FROM products WHERE barcode IS NOT NULL AND barcode NOT LIKE '2%' AND off_checked_at IS NULL")->fetchColumn();
+            out(['off_pending' => $offPending, 'products' => $rows, 'aisle_order' => json_decode(user_setting('aisle_order', DEFAULT_AISLES), true) ?: []]);
 
         case 'pantry.set':
             $pid = int_in($in, 'product_id');
@@ -595,7 +720,11 @@ try {
             if ($code === '' || strlen($code) > 32) {
                 fail('Invalid barcode');
             }
-            $row = q('SELECT * FROM products WHERE barcode = ?', [$code])->fetch();
+            if (strlen($code) === 13 && $code[0] === '2') {
+                // a shop's own label for weighed items (meat, deli): it encodes a price or weight, not a product
+                out(['product' => null, 'suggestion' => null, 'barcode' => $code, 'instore' => true]);
+            }
+            $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.barcode = ?', [$uid, $code])->fetch();
             if ($row) {
                 out(['product' => product_row($row, latest_prices([(int)$row['id']])), 'suggestion' => null]);
             }
@@ -605,6 +734,48 @@ try {
             // fetch Open Food Facts data for an existing product's barcode (e.g. to fill in nutrition later)
             $code = preg_replace('/\D/', '', (string)($in['barcode'] ?? ''));
             out(['suggestion' => $code === '' ? null : off_lookup($code)]);
+
+        case 'products.refresh_off':
+            // fetch Nutri-Score / NOVA / additives for scanned products that haven't been checked; a few per call
+            $todo = q("SELECT id, barcode FROM products WHERE barcode IS NOT NULL AND barcode NOT LIKE '2%' AND (off_checked_at IS NULL OR ?) ORDER BY id LIMIT 6", [!empty($in['all']) ? 1 : 0])->fetchAll();
+            if (!empty($in['all'])) {
+                q('UPDATE products SET off_checked_at = NULL WHERE barcode IS NOT NULL');   // start a full pass
+                $in['all'] = false;
+            }
+            foreach ($todo as $t) {
+                apply_off((int)$t['id'], off_lookup($t['barcode']));
+            }
+            $left = (int)q("SELECT COUNT(*) FROM products WHERE barcode IS NOT NULL AND barcode NOT LIKE '2%' AND off_checked_at IS NULL")->fetchColumn();
+            out(['checked' => count($todo), 'left' => $left]);
+
+        case 'products.photo':
+            // save a label photo (JPEG/PNG as base64, already shrunk on the phone)
+            $pid = int_in($in, 'product_id');
+            $mime = in_array($in['mime'] ?? '', ['image/jpeg', 'image/png', 'image/webp'], true) ? $in['mime'] : fail('Unsupported image');
+            $data = (string)($in['data'] ?? '');
+            if ($data === '' || strlen($data) > 1400000 || base64_decode($data, true) === false) {
+                fail('Photo too large or unreadable');
+            }
+            $kind = in_array($in['kind'] ?? '', ['label', 'ingredients', 'front'], true) ? $in['kind'] : 'label';
+            q('DELETE FROM product_photos WHERE product_id = ? AND kind = ?', [$pid, $kind]);
+            q('INSERT INTO product_photos (product_id, kind, mime, data, user_id) VALUES (?, ?, ?, ?, ?)', [$pid, $kind, $mime, $data, $uid]);
+            out(['id' => (int)db()->lastInsertId()]);
+
+        case 'products.photo_delete':
+            q('DELETE FROM product_photos WHERE id = ?', [int_in($in, 'id')]);
+            out(['ok' => true]);
+
+        case 'label.read':
+            $mime = in_array($in['mime'] ?? '', ['image/jpeg', 'image/png', 'image/webp'], true) ? $in['mime'] : 'image/jpeg';
+            $data = (string)($in['data'] ?? '');
+            if ($data === '' && ($photoId = int_in($in, 'photo_id', false))) {
+                $ph = q('SELECT mime, data FROM product_photos WHERE id = ?', [$photoId])->fetch() ?: fail('Photo not found', 404);
+                [$mime, $data] = [$ph['mime'], $ph['data']];
+            }
+            if ($data === '' || strlen($data) > 1400000) {
+                fail('Photo too large or missing');
+            }
+            out(read_label($data, $mime));
 
         case 'products.save':
             $id = int_in($in, 'id', false);
@@ -620,6 +791,22 @@ try {
             ];
             foreach (NUTRIENTS as $n) {
                 $fields[$n] = num_in($in['nutrition'] ?? [], $n, null, 0, 100000);
+            }
+            if (array_key_exists('ingredients', $in)) {
+                $fields['ingredients'] = str_in($in, 'ingredients', 4000);
+            }
+            // health info from Open Food Facts travels with the form; additives also come from the typed ingredient list
+            $grade = strtolower((string)($in['nutriscore'] ?? ''));
+            if (in_array($grade, ['a', 'b', 'c', 'd', 'e'], true)) {
+                $fields['nutriscore'] = $grade;
+            }
+            $nova = (int)($in['nova'] ?? 0);
+            if ($nova >= 1 && $nova <= 4) {
+                $fields['nova'] = $nova;
+            }
+            $adds = clean_additives(array_merge((array)($in['additives'] ?? []), additives_in($fields['ingredients'] ?? null)));
+            if ($adds || array_key_exists('ingredients', $in)) {
+                $fields['additives'] = $adds ? implode(',', $adds) : null;
             }
             if ($barcode !== null) {
                 $dupe = q('SELECT id FROM products WHERE barcode = ? AND id <> ?', [$barcode, $id ?? 0])->fetchColumn();
