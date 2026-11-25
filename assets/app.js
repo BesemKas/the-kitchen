@@ -664,6 +664,12 @@ async function renderList() {
 
     ${items.length ? `<div class="row"><button class="btn small grow" data-act="clear-checked" ${done.length ? '' : 'disabled'}>Remove ticked</button><button class="btn small danger grow" data-act="clear-all">Clear list</button></div>` : ''}
 
+    ${(() => {
+      const onList = new Set(items.filter((i) => !i.checked && i.product_id).map((i) => i.product_id));
+      const low = S.products.filter((p) => ['low', 'out'].includes(pantryState(p)) && !onList.has(p.id))
+        .sort((a, b) => (pantryState(a) === 'out' ? 0 : 1) - (pantryState(b) === 'out' ? 0 : 1) || (b.bought_count || 0) - (a.bought_count || 0)).slice(0, 8);
+      return low.length ? `<section class="card stack"><h2>Running low at home</h2>${low.map((p) => `<div class="row"><span class="grow">${esc(p.name)} <span class="small ${pantryState(p) === 'out' ? 'bad-text' : 'warn-text'}">${PANTRY_LABEL[pantryState(p)].toLowerCase()}</span></span><button type="button" class="btn small" data-addlow="${p.id}">＋ Add</button></div>`).join('')}</section>` : '';
+    })()}
     ${where ? whereToShopHtml(where) : ''}
 
     <div class="addbar">
@@ -726,7 +732,7 @@ async function renderList() {
     const matches = S.products.filter((p) => `${p.name} ${p.brand || ''}`.toLowerCase().includes(q)).slice(0, 6);
     sug.innerHTML = matches.map((p) => {
       const pr = priceAt(p.prices, S.storeId);
-      return `<button data-pid="${p.id}"><span>${esc(p.name)} <span class="muted small">${esc(p.brand || '')} ${packLabel(p)}${p.pantry > 0 ? ` · ${fmtAmount(p.pantry, p.unit)} at home` : ''}</span></span><span class="num small">${money(pr.price)}</span></button>`;
+      return `<button data-pid="${p.id}"><span>${esc(p.name)} <span class="muted small">${esc(p.brand || '')} ${packLabel(p)}${pantryState(p) ? ` · ${PANTRY_LABEL[pantryState(p)].toLowerCase()}` : ''}</span></span><span class="num small">${money(pr.price)}</span></button>`;
     }).join('') + `<button data-new="1"><span>Add “${esc(input.value.trim())}” as a one-off</span><span class="muted">＋</span></button>`;
     sug.hidden = false;
   };
@@ -748,6 +754,8 @@ async function renderList() {
   };
 
   view.onclick = async (e) => {
+    const addLow = e.target.closest('[data-addlow]');
+    if (addLow) { try { await api('list.add', { product_id: addLow.dataset.addlow, qty: 1 }); } catch (er) { fail(er); } return renderList(); }
     const eat = e.target.closest('[data-eat]');
     if (eat) { try { await eatMeal(eat.dataset.eat, eat.dataset.eaten === '1'); } catch (er) { fail(er); } return renderList(); }
     const home = e.target.closest('[data-home]');
@@ -1475,7 +1483,7 @@ async function usualsSheet() {
       const pr = priceAt(p.prices, S.storeId);
       const n = onList.get(p.id) || 0;
       const bits = [esc(p.brand || ''), packLabel(p), pr.price !== null ? `${money(pr.price)}${pr.here ? '' : ` at ${esc(storeName(pr.storeId))}`}` : 'no price',
-        p.bought_count ? `bought ${p.bought_count}×` : '', p.pantry > 0 ? `<span class="good-text">${fmtAmount(p.pantry, p.unit)} at home</span>` : ''].filter(Boolean);
+        p.bought_count ? `bought ${p.bought_count}×` : '', pantryState(p) ? `<span class="${pantryState(p) === 'plenty' ? 'good-text' : 'warn-text'}">${PANTRY_LABEL[pantryState(p)].toLowerCase()}</span>` : ''].filter(Boolean);
       return `<li data-pid="${p.id}"><div class="grow"><div class="name">${esc(p.name)}${n ? ` <span class="tag">${fmtQty(n)} on list</span>` : ''}</div><div class="sub">${bits.join(' · ')}</div></div>
         <button type="button" class="icon-btn add-btn" data-add="${p.id}" aria-label="Add ${esc(p.name)} to the list">＋</button></li>`;
     }).join('') || `<li class="empty">${S.products.length ? 'No matches.' : 'Nothing scanned yet. Scan products as you shop and they show up here.'}</li>`;
@@ -1506,7 +1514,7 @@ async function renderProducts() {
       <button class="btn primary" data-act="new">＋</button>
     </div>
     <div class="chips" role="group" aria-label="Sort products">
-      ${[['name', 'A–Z'], ['protein', 'Cheapest protein'], ['health', 'Healthiest']].map(([k, l]) => `<button type="button" class="chip ${(store.get('prodSort', 'name') === k) ? 'active' : ''}" data-sort="${k}">${l}</button>`).join('')}
+      ${[['name', 'A–Z'], ['low', 'Low or out'], ['protein', 'Cheapest protein'], ['health', 'Healthiest']].map(([k, l]) => `<button type="button" class="chip ${(store.get('prodSort', 'name') === k) ? 'active' : ''}" data-sort="${k}">${l}</button>`).join('')}
     </div>
     <div id="offBanner"></div>
     <section class="card flush"><ul class="list" id="prodList"></ul></section>`;
@@ -1537,7 +1545,8 @@ async function renderProducts() {
   const draw = () => {
     const term = document.getElementById('prodSearch').value.trim().toLowerCase();
     store.set('prodSearch', term);
-    const rows = S.products.filter((p) => !term || `${p.name} ${p.brand || ''} ${p.category || ''} ${p.barcode || ''}`.toLowerCase().includes(term))
+    const lowOnly = store.get('prodSort', 'name') === 'low';
+    const rows = S.products.filter((p) => (!term || `${p.name} ${p.brand || ''} ${p.category || ''} ${p.barcode || ''}`.toLowerCase().includes(term)) && (!lowOnly || ['low', 'out'].includes(pantryState(p))))
       .sort((a, b) => sortKey(a) - sortKey(b) || a.name.localeCompare(b.name));
     listEl.innerHTML = rows.length ? rows.map((p) => {
       const pr = priceAt(p.prices, S.storeId);
@@ -1545,7 +1554,8 @@ async function renderProducts() {
       const pc = proteinCost(p, pr.price);
       const al = analyseProduct(p).alerts;
       return `<li class="tap ${al.length ? 'has-alert' : ''}" data-id="${p.id}"><div class="grow"><div class="name">${esc(p.name)} ${healthBadges(p)}${al.length ? ` <span class="alert-dot" title="${al.length} alert${al.length === 1 ? '' : 's'}">!</span>` : ''}</div>
-        <div class="sub">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price), p.pantry > 0 ? `<span class="good-text">${fmtAmount(p.pantry, p.unit)} at home</span>` : ''].filter(Boolean).join(' · ')}</div>
+        <div class="sub">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price)].filter(Boolean).join(' · ')}</div>
+        ${pantryChip(p)}
         ${pc !== null ? `<div class="sub protein-cost">${proteinLabel(pc)}</div>` : ''}</div>
         <div class="right"><div class="num strong">${money(pr.price)}</div><div class="small muted">${pr.price === null ? 'no price' : pr.here ? esc(storeName(pr.storeId)) : `at ${esc(storeName(pr.storeId))}`}${n > 1 ? ` · ${n} shops` : ''}</div></div>
         <button type="button" class="icon-btn add-btn" data-add="${p.id}" aria-label="Add ${esc(p.name)} to the list">＋</button></li>`;
@@ -1554,6 +1564,12 @@ async function renderProducts() {
   draw();
   view.oninput = (e) => { if (e.target.id === 'prodSearch') draw(); };
   view.onclick = async (e) => {
+    const chip = e.target.closest('[data-pantry]');
+    if (chip) {
+      const p = S.products.find((x) => x.id === Number(chip.dataset.pantry));
+      try { const st = await cyclePantry(p); toast(`${p.name}: ${PANTRY_LABEL[st]}`); draw(); } catch (er) { fail(er); }
+      return;
+    }
     const sortBtn = e.target.closest('[data-sort]');
     if (sortBtn) { store.set('prodSort', sortBtn.dataset.sort); view.querySelectorAll('[data-sort]').forEach((b) => b.classList.toggle('active', b === sortBtn)); return draw(); }
     const act = e.target.closest('[data-act]');
@@ -2720,6 +2736,27 @@ function recipeEditor(r) {
 }
 
 /* ================= MEAL PLAN ================= */
+/* ----- at home: plenty, low or out, instead of grams nobody keeps up to date ----- */
+/** Roughly what's at home: half a pack or more is plenty. null for things you've never had. */
+function pantryState(p) {
+  if (!(p.pantry > 0) && !p.bought_count) return null;
+  if (!(p.pantry > 0)) return 'out';
+  return p.pantry < (p.pack_size || 1) * 0.5 ? 'low' : 'plenty';
+}
+const PANTRY_LABEL = { plenty: 'Plenty at home', low: 'Low', out: 'Out' };
+const PANTRY_NEXT = { plenty: 'low', low: 'out', out: 'plenty' };
+const pantryAmountFor = (p, st) => (st === 'plenty' ? (p.pack_size || 1) : st === 'low' ? (p.pack_size || 1) * 0.25 : 0);
+const pantryChip = (p) => { const st = pantryState(p); return st ? `<button type="button" class="home-chip home-${st}" data-pantry="${p.id}" aria-label="${esc(p.name)}: ${PANTRY_LABEL[st]}. Tap to change">${PANTRY_LABEL[st]}</button>` : ''; };
+/** Tap the chip: plenty → low → out → plenty. */
+async function cyclePantry(p) {
+  const next = PANTRY_NEXT[pantryState(p) || 'out'];
+  const amount = pantryAmountFor(p, next);
+  await api('pantry.set', { product_id: p.id, amount });
+  p.pantry = amount;
+  if (!p.bought_count) p.bought_count = 1;
+  return next;
+}
+
 /* ----- ingredient units: type "100 g" of a cheese bought per kg ----- */
 const ING_UNITS = { g: ['mass', 1], kg: ['mass', 1000], ml: ['vol', 1], l: ['vol', 1000], tsp: ['vol', 5], tbsp: ['vol', 15], cup: ['vol', 250], each: ['count', 1] };
 const ING_LABEL = { g: 'g', kg: 'kg', ml: 'ml', l: 'litre', tsp: 'tsp', tbsp: 'tbsp', cup: 'cup', each: 'each', pack: 'pack' };
