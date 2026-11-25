@@ -23,6 +23,9 @@ if (($_POST['action'] ?? '') === 'login') {
 }
 
 $user = current_user();
+if ($user) {
+    header('X-Kitchen-Shell: 1');   // lets the service worker keep this page for offline use
+}
 ?><!doctype html>
 <html lang="en">
 <head>
@@ -36,7 +39,7 @@ $user = current_user();
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
-<link rel="stylesheet" href="assets/app.css?v=7">
+<link rel="stylesheet" href="assets/app.css?v=8">
 </head>
 <?php if (!$user): ?>
 <body class="auth">
@@ -59,6 +62,7 @@ $user = current_user();
   <h1 id="title">List</h1>
   <button id="budgetPill" class="pill" type="button"></button>
 </header>
+<div id="netbar" class="netbar" role="status" aria-live="polite" hidden></div>
 <main id="view" class="view"></main>
 <nav class="tabs" aria-label="Main">
   <a href="#list" data-tab="list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.7a2 2 0 0 0 2-1.5L21 8H6.2"/><circle cx="10" cy="20" r="1.3"/><circle cx="17" cy="20" r="1.3"/></svg>List</a>
@@ -70,7 +74,7 @@ $user = current_user();
 <div id="sheet" class="sheet" hidden><div class="sheet-body" id="sheetBody"></div></div>
 <div id="toast" class="toast" hidden></div>
 <script src="assets/zxing-browser.min.js"></script>
-<script src="assets/app.js?v=7"></script>
+<script src="assets/app.js?v=8"></script>
 </body>
 <?php endif; ?>
 </html>

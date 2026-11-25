@@ -1,7 +1,7 @@
 'use strict';
 
 /* ---------- basics ---------- */
-const CSRF = document.querySelector('meta[name=csrf]').content;
+let CSRF = document.querySelector('meta[name=csrf]').content;
 const view = document.getElementById('view');
 const sheet = document.getElementById('sheet');
 const sheetBody = document.getElementById('sheetBody');
@@ -21,7 +21,27 @@ const store = {
   set(k, v) { try { localStorage.setItem('kb_' + k, JSON.stringify(v)); } catch { /* private mode */ } },
 };
 
-async function api(action, data = {}) {
+/* ================= DATA, OFFLINE AND SYNC =================
+ * Reads (list, products, plan…) are kept in localStorage so the app still shows them with no signal.
+ * Shopping-list changes made offline go into a queue, are applied to the saved copy straight away,
+ * and are sent in order when the connection comes back. Each queued change has an op_id so the
+ * server ignores it if it already arrived. */
+const READS = new Set(['bootstrap', 'list.get', 'products.list', 'plan.get', 'recipes.list', 'fridge.list', 'budget.get', 'takeaway.get']);
+const QUEUEABLE = new Set(['list.add', 'list.update', 'list.delete', 'list.clear', 'list.checkout', 'products.price']);
+const lsGet = (k, d = null) => { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* full or blocked */ } };
+const cacheKey = (action, data) => `kb:${action}:${JSON.stringify(data)}`;
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID()
+  : '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, (c) => (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16)));
+let queue = lsGet('kb:queue', []);
+let online = navigator.onLine;
+let syncing = null;
+
+class Offline extends Error { constructor() { super('No connection'); this.offline = true; } }
+
+async function post(action, data, timeout = 12000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeout);
   let res;
   try {
     res = await fetch('api.php', {
@@ -29,15 +49,198 @@ async function api(action, data = {}) {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-CSRF': CSRF },
       body: JSON.stringify({ action, ...data }),
+      signal: ctl.signal,
     });
   } catch {
-    throw new Error('No connection');
+    throw new Offline();
+  } finally { clearTimeout(timer); }
+  if (res.status === 419 && await refreshToken()) return post(action, data, timeout);
+  if (res.status === 401 || res.status === 419) {
+    if (queue.length) throw Object.assign(new Error('Logged out. Log in again to send your offline changes.'), { auth: true });
+    location.reload(); throw new Error('Session expired');
   }
-  if (res.status === 401 || res.status === 419) { location.reload(); throw new Error('Session expired'); }
   let json = {};
   try { json = await res.json(); } catch { /* ignore */ }
-  if (!res.ok) throw new Error(json.error || 'Something went wrong');
+  if (!res.ok) throw Object.assign(new Error(json.error || 'Something went wrong'), { status: res.status });
   return json;
+}
+
+/** The page we booted from may be an old offline copy with an old token: fetch a fresh one. */
+async function refreshToken() {
+  try {
+    const html = await (await fetch('./', { credentials: 'same-origin', cache: 'no-store' })).text();
+    const m = html.match(/<meta name="csrf" content="([0-9a-f]+)"/);
+    if (m && m[1] !== CSRF) { CSRF = m[1]; return true; }
+  } catch { /* offline */ }
+  return false;
+}
+
+function setOnline(v) {
+  if (online !== v) { online = v; if (v) sync(); }
+  netbar();
+}
+
+async function api(action, data = {}) {
+  if (READS.has(action)) {
+    if (queue.length) await sync();
+    const key = cacheKey(action, data);
+    if (!queue.length) {
+      try {
+        const r = await post(action, data, 10000);
+        lsSet(key, r); setOnline(true);
+        return r;
+      } catch (er) { if (!er.offline) throw er; setOnline(false); }
+    }
+    const saved = lsGet(key);
+    if (saved) return { ...saved, _offline: true };
+    throw new Error("You're offline and this hasn't been opened with signal yet");
+  }
+  if (QUEUEABLE.has(action)) {
+    const op = { action, data: { ...data, op_id: uuid() } };
+    if (!queue.length) {
+      try { const r = await post(action, op.data); setOnline(true); return r; } catch (er) { if (!er.offline) throw er; setOnline(false); }
+    }
+    queue.push(op); lsSet('kb:queue', queue);
+    const r = applyLocal(op);
+    netbar();
+    sync();
+    return r;
+  }
+  if (action === 'products.lookup') {
+    try { return await post(action, data, 8000); } catch (er) {
+      if (!er.offline) throw er;
+      setOnline(false);
+      const code = String(data.barcode || '').replace(/\D/g, '');
+      const p = (lsGet(cacheKey('products.list', {}), { products: [] }).products || []).find((x) => x.barcode === code);
+      return { product: p || null, barcode: code, offline: !p };
+    }
+  }
+  try { const r = await post(action, data); setOnline(true); return r; } catch (er) {
+    if (er.offline) { setOnline(false); throw new Error("You're offline. This needs a connection"); }
+    throw er;
+  }
+}
+
+/** Send queued changes in order. Stops at the first network failure and tries again later. */
+function sync() {
+  if (syncing) return syncing;
+  syncing = (async () => {
+    const ids = lsGet('kb:ids', {});   // temporary id of an item added offline -> its real id
+    let sent = 0;
+    while (queue.length) {
+      const op = queue[0];
+      const data = { ...op.data };
+      if (data.id < 0) {
+        if (!ids[data.id]) { queue.shift(); lsSet('kb:queue', queue); continue; }   // its add never made it
+        data.id = ids[data.id];
+      }
+      try {
+        const r = await post(op.action, data);
+        if (op.action === 'list.add' && op.tempId) { ids[op.tempId] = r.id; lsSet('kb:ids', ids); }
+        sent++;
+      } catch (er) {
+        if (er.offline || er.auth) { setOnline(!er.offline); netbar(er.auth ? er.message : null); return; }
+        toast(`Couldn't save a change: ${er.message}`);   // server said no: drop it, don't block the rest
+      }
+      queue.shift(); lsSet('kb:queue', queue);
+      netbar();
+    }
+    localStorage.removeItem('kb:ids');
+    setOnline(true);
+    if (sent) { toast(`Synced ${sent} change${sent === 1 ? '' : 's'}`); if (typeof route === 'function' && sheet.hidden) route(); }
+  })().finally(() => { syncing = null; });
+  return syncing;
+}
+
+/** Apply a queued change to the saved list/products so the screen shows it straight away. */
+function applyLocal(op) {
+  const d = op.data;
+  const lk = cacheKey('list.get', {});
+  const pk = cacheKey('products.list', {});
+  const list = lsGet(lk);
+  const prods = lsGet(pk);
+  const product = (id) => ((prods && prods.products) || []).find((p) => p.id === id);
+  let out = { ok: true, _queued: true };
+  if (list) {
+    const items = list.items;
+    const byId = (id) => items.find((i) => i.id === Number(id));
+    switch (op.action) {
+      case 'list.add': {
+        const checked = !!d.checked;
+        const pid = d.product_id ? Number(d.product_id) : null;
+        const qty = Number(d.qty) || 1;
+        const same = pid && items.find((i) => i.product_id === pid && i.checked === checked && (checked || !i.from_plan));
+        if (same) { same.qty += qty; out = { id: same.id, _queued: true }; break; }
+        const p = pid ? product(pid) : null;
+        const id = -Date.now();
+        op.tempId = id;
+        items.push({ id, product_id: pid, name: p ? p.name : d.name, qty, checked, from_plan: false,
+          unit_price: pid ? null : (d.unit_price === undefined || d.unit_price === '' ? null : Number(d.unit_price)),
+          prices: p ? p.prices : {}, pack_size: p ? p.pack_size : null, unit: p ? p.unit : null, brand: p ? p.brand : null,
+          category: p ? p.category : null, added_by_name: S.user ? S.user.display_name : '' });
+        out = { id, _queued: true };
+        break;
+      }
+      case 'list.update': {
+        const it = byId(d.id);
+        if (!it) break;
+        if ('qty' in d) it.qty = Number(d.qty);
+        if ('checked' in d) it.checked = !!d.checked;
+        if ('price' in d) {
+          if (it.product_id && d.store_id) it.prices = { ...it.prices, [d.store_id]: { price: Number(d.price) } };
+          else it.unit_price = d.price === null || d.price === '' ? null : Number(d.price);
+        }
+        break;
+      }
+      case 'list.delete': list.items = items.filter((i) => i.id !== Number(d.id)); break;
+      case 'list.clear': list.items = d.all ? [] : items.filter((i) => !i.checked); break;
+      case 'list.checkout': {
+        const total = Number(d.total) || 0;
+        const estimate = items.filter((i) => i.checked).reduce((t, i) => t + (itemPrice(i).price || 0) * i.qty, 0);
+        list.items = items.filter((i) => !i.checked);
+        list.spent += total;
+        out = { total, estimate, spent: list.spent, _queued: true };
+        break;
+      }
+      default: break;
+    }
+    if (op.action === 'products.price') {
+      for (const i of list.items) if (i.product_id === Number(d.product_id)) i.prices = { ...i.prices, [d.store_id]: { price: Number(d.price) } };
+    }
+    lsSet(lk, list);
+  }
+  if (prods && (op.action === 'products.price' || (op.action === 'list.update' && 'price' in d && d.store_id))) {
+    const pid = op.action === 'products.price' ? Number(d.product_id) : (list && (list.items.find((i) => i.id === Number(d.id)) || {}).product_id);
+    const p = product(pid);
+    if (p) { p.prices = { ...p.prices, [d.store_id]: { price: Number(d.price) } }; lsSet(pk, prods); }
+  }
+  lsSet('kb:queue', queue);   // op.tempId may have been set
+  return out;
+}
+
+function netbar(msg = null) {
+  const bar = document.getElementById('netbar');
+  if (!bar) return;
+  const n = queue.length;
+  const text = msg || (!online ? `Offline · showing saved data${n ? ` · ${n} change${n === 1 ? '' : 's'} waiting to sync` : ''}`
+    : n ? `Syncing ${n} change${n === 1 ? '' : 's'}…` : '');
+  bar.textContent = text;
+  bar.hidden = !text;
+  bar.classList.toggle('offline', !online);
+}
+
+window.addEventListener('online', () => setOnline(true));
+window.addEventListener('offline', () => setOnline(false));
+setInterval(() => { if (queue.length) sync(); }, 30000);
+document.addEventListener('DOMContentLoaded', () => netbar());
+if (queue.length) setTimeout(sync, 1500);
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js', { scope: './' }).then(async (reg) => {
+    await navigator.serviceWorker.ready;
+    const urls = performance.getEntriesByType('resource').map((e) => e.name).concat([...document.querySelectorAll('link[rel=stylesheet],script[src]')].map((e) => e.href || e.src));
+    (reg.active || navigator.serviceWorker.controller)?.postMessage({ type: 'cache', urls });
+  }).catch(() => { /* not available (e.g. http) */ });
 }
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -713,6 +916,10 @@ async function scanFlow(from) {
     toast('Looking up…');
     try {
       const r = await api('products.lookup', { barcode: code });
+      if (r.offline) {
+        toast("Offline: this barcode isn't saved yet. Add it by name for now and scan it again when you have signal.");
+        return;
+      }
       if (r.product) {
         if (from === 'list') return quickAddSheet(r.product);
         return productEditor(r.product);
@@ -1783,7 +1990,14 @@ async function renderBudget() {
       }
       if (t.dataset.act === 'add-trip') return tripSheet();
       if (t.dataset.act === 'log-ta') return takeawaySheet(() => renderBudget());
-      if (t.dataset.act === 'logout') { await api('logout'); location.reload(); }
+      if (t.dataset.act === 'logout') {
+        if (queue.length && !confirm(`${queue.length} change${queue.length === 1 ? " hasn't" : "s haven't"} synced yet and will be lost. Log out anyway?`)) return;
+        await api('logout');
+        // forget the offline copy of everything on this phone
+        Object.keys(localStorage).filter((k) => k.startsWith('kb:')).forEach((k) => localStorage.removeItem(k));
+        navigator.serviceWorker?.controller?.postMessage({ type: 'clear' });
+        location.reload();
+      }
       if (t.dataset.act === 'password') return passwordSheet();
     } catch (er) { fail(er); }
   };

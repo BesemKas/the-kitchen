@@ -103,3 +103,13 @@ assets/zxing-browser.min.js   barcode scanner library (MIT), served locally
 - All SQL uses prepared statements.
 - `app/` is blocked from the web by its own `.htaccess`.
 - A strict Content-Security-Policy blocks inline scripts.
+
+## Offline
+
+The app works with no signal, for example inside a shop:
+
+- `sw.js` (a service worker) keeps the app page, styles, scripts, fonts and the scanner on the phone.
+- The last data each screen loaded is kept on the phone, so the list, products, plan and recipes still open.
+- Shopping-list changes made offline (add, tick, quantities, prices, finish shop) are saved on the phone and sent when the connection comes back. A bar at the top shows how many are waiting.
+- Each offline change has an id, and the server remembers ids for 14 days (`op_log` table), so a change sent twice is only applied once.
+- Logging out clears the copy on the phone.
