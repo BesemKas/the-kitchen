@@ -564,3 +564,13 @@ button.pick { display: flex; width: 100%; text-align: left; padding: 12px 14px; 
 .list li .grow.tap { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .list li .grow.tap:active .name { opacity: .7; }
 .list li .sub .linklike.hint { padding: 0; font: inherit; color: var(--warn); }
+
+/* Kitchen: what's at home, grouped and folded */
+.home-group > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; cursor: pointer; }
+.home-group > summary::-webkit-details-marker { display: none; }
+.home-group > summary::after { content: '›'; color: var(--muted); margin-left: 10px; transition: transform .15s; }
+.home-group[open] > summary::after { transform: rotate(90deg); }
+.home-group > summary b { flex: 1; }
+.card > h2.pad { padding: 14px 16px 0; margin: 0; }
+p.center { text-align: center; }
+#kitchenBody .list li .home-chip { margin-top: 0; flex: none; }
