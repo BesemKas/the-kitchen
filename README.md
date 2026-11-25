@@ -195,3 +195,16 @@ To switch it on, make one account for the app at openfoodfacts.org and add `off_
 - **Check-ins:** a week after someone joins, and again at four weeks, the app asks three questions once: what they used most, what annoyed them, what's missing. "Not now" doesn't ask that one again.
 - **Tell us what to fix or add** (Budget → Settings): free-text feedback any time.
 - What's logged: the days each person opened the app, and the result of each barcode scan (known, found on Open Food Facts, missing, in-store label). Never which product.
+
+## Tabs
+
+The app follows the day:
+
+- **Today** (opens here): meals ready, takeaway allowance, today's planned meals to tick off, and groceries left.
+- **Shop:** the shopping list first, then where to shop. One line on top shows what's left after this list.
+- **Plan:** the week. A Week / Recipes switch at the top leads to the recipes.
+- **Kitchen:** fridge and freezer portions (tap to open), and the product catalogue.
+- **Money:** the pay month, takeaways and every shop logged.
+- **Me** (the round initial at the top): name, daily targets, budget, payday, takeaway allowance, household, shops, aisle order, sharing, feedback, account and data, and admin tools.
+
+Old links (`#list`, `#products`, `#budget`) redirect to Shop, Kitchen and Money.

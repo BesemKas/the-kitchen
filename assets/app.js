@@ -7,6 +7,8 @@ const sheet = document.getElementById('sheet');
 const sheetBody = document.getElementById('sheetBody');
 const titleEl = document.getElementById('title');
 const pill = document.getElementById('budgetPill');
+const meBtn = document.getElementById('meBtn');
+meBtn.addEventListener('click', () => { location.hash = '#me'; });
 
 /* South African phones type a decimal comma, and a type="number" field silently drops "12,50".
    So every number field becomes a text field with a decimal keypad, and a comma turns into a point as you type. */
@@ -437,17 +439,31 @@ function updatePill() {
   pill.textContent = `${money(left)} left`;
   pill.className = 'pill' + (left < 0 ? ' bad' : left < S.budget * 0.2 ? ' warn' : '');
 }
-pill.addEventListener('click', () => { location.hash = '#budget'; });
+pill.addEventListener('click', () => { location.hash = '#money'; });
 
 /* ---------- routing ---------- */
-const routes = { list: ['List', renderList], products: ['Products', renderProducts], plan: ['Meal plan', renderPlan], recipes: ['Recipes', renderRecipes], budget: ['Budget', renderBudget] };
+/* Tabs follow the day: Today, Shop, Plan (with Recipes), Kitchen, Money. Me opens from the round button at the top. */
+const routes = {
+  today: ['Today', () => renderToday(), 'today'],
+  shop: ['Shop', () => renderList(), 'shop'],
+  plan: ['Meal plan', () => renderPlan(), 'plan'],
+  recipes: ['Recipes', () => renderRecipes(), 'plan'],
+  kitchen: ['Kitchen', () => renderProducts(), 'kitchen'],
+  money: ['Money', () => renderBudget('money'), 'money'],
+  me: ['Me', () => renderBudget('me'), null],
+};
+const OLD_TABS = { list: 'shop', products: 'kitchen', budget: 'money' };   // old links and bookmarks still land somewhere sensible
+const onShop = () => location.hash === '#shop' || location.hash === '#list';
 async function route(opts) {
   const keep = !!(opts && opts.keep);   // refresh in place: no "Loading…" flash, keep the scroll position
-  const key = (location.hash || '#list').slice(1).split('/')[0];
-  const [title, fn] = routes[key] || routes.list;
+  let key = (location.hash || '#today').slice(1).split('/')[0];
+  if (OLD_TABS[key]) { key = OLD_TABS[key]; history.replaceState(null, '', `#${key}`); }
+  if (!routes[key]) key = 'today';
+  const [title, fn, tab] = routes[key];
   titleEl.textContent = title;
-  document.body.className = `route-${routes[key] ? key : 'list'}`;
-  document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === key));
+  document.body.className = `route-${key}`;
+  document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
+  meBtn.classList.toggle('active', key === 'me');
   view.onclick = view.oninput = view.onchange = view.onsubmit = null;
   const y = window.scrollY;
   if (!keep) view.innerHTML = '<p class="empty">Loading…</p>';
@@ -627,20 +643,9 @@ async function renderList() {
   const alertSummary = alertCount ? `<button type="button" class="alert-banner lv-amber" data-act="alerts-review"><span class="grow"><b>${alertCount} item${alertCount === 1 ? ' has an alert' : 's have alerts'}.</b>${swapSave >= 1 ? ` Swapping saves about ${money0(swapSave)} for the same protein.` : ' Tap one to see why.'}</span><span aria-hidden="true">›</span></button>` : '';
 
   view.innerHTML = `
-    ${budget > 0 ? '' : `<a class="banner" href="#budget"><b>Set your monthly grocery budget</b><span class="small">Budget tab → Settings. Then this shows what's left.</span></a>`}
-    <section class="ring-card ${budget > 0 ? '' : 'hidden'}">
-      ${ringSvg(spent, listTotal, budget)}
-      <div class="ring-text">
-        <span class="small muted">Left ${esc(periodText)}</span>
-        <span class="big">${money0(left)}</span>
-        ${items.length ? `<span class="small ${after < 0 ? 'bad-text' : 'good-text'}">${after < 0 ? `${money0(-after)} over after this list` : `${money0(after)} after this list`}</span>` : `<span class="small muted">of ${money0(budget)} this pay month</span>`}
-      </div>
-    </section>
-
-    ${homeCardsHtml(fridge, takeaway, lastShop)}
-    ${todayHtml(todayMeals, fridge)}
-
-    ${where ? whereToShopHtml(where) : `<div class="chips" role="group" aria-label="Shop you're in">
+    ${budget > 0 ? '' : `<a class="banner" href="#me"><b>Set your monthly grocery budget</b><span class="small">Tap your initial at the top → Money. Then this shows what's left.</span></a>`}
+    ${budget > 0 && items.length ? `<p class="small shop-budget">${money0(left)} left ${esc(periodText)} · <span class="${after < 0 ? 'bad-text' : 'good-text'}">${after < 0 ? `${money0(-after)} over after this list` : `${money0(after)} after this list`}</span></p>` : ''}
+    ${where ? '' : `<div class="chips" role="group" aria-label="Shop you're in">
       ${compare.map((c) => {
         const detail = !c.count ? '' : c.known === c.count ? ` · <span class="num">${money0(c.total)}</span>` : ` <span class="sub">${c.known}/${c.count}</span>`;
         return `<button type="button" class="chip ${c.id === String(S.storeId) ? 'active' : ''}" data-store="${c.id}" aria-pressed="${c.id === String(S.storeId)}">${esc(c.name)}${detail}${c.id === cheapest ? ' <span class="best">✓</span>' : ''}</button>`;
@@ -658,6 +663,8 @@ async function renderList() {
       <button class="btn primary block" data-act="checkout">Finish shop · ${money(checkedTotal)}</button>` : ''}
 
     ${items.length ? `<div class="row"><button class="btn small grow" data-act="clear-checked" ${done.length ? '' : 'disabled'}>Remove ticked</button><button class="btn small danger grow" data-act="clear-all">Clear list</button></div>` : ''}
+
+    ${where ? whereToShopHtml(where) : ''}
 
     <div class="addbar">
       <div class="field">
@@ -797,6 +804,33 @@ async function renderList() {
   };
 }
 
+/* ---------- Today: what am I eating, and am I on track? ---------- */
+async function renderToday() {
+  const { spent, budget, takeaway, fridge, today: todayMeals, last_shop: lastShop, period } = await api('list.get');
+  if (period) S.period = period;
+  S.takeawayWeekly = takeaway.weekly;
+  S.spent = spent; S.budget = budget; updatePill();
+  const left = budget - spent;
+  const days = S.period && S.period.days_left ? S.period.days_left : null;
+  const name = (S.user.display_name || '').split(' ')[0];
+  const hour = new Date().getHours();
+  view.innerHTML = `
+    <div class="today-head">
+      <div><div class="small muted">${esc(new Date().toLocaleDateString('en-ZA', { weekday: 'long', day: 'numeric', month: 'long' }))}</div>
+        <h2 class="greet">${hour < 12 ? 'Morning' : hour < 17 ? 'Afternoon' : 'Evening'}${name ? `, ${esc(name)}` : ''}</h2></div>
+    </div>
+    ${homeCardsHtml(fridge, takeaway, lastShop)}
+    ${todayHtml(todayMeals, fridge) || `<section class="card stack"><h2>Nothing planned today</h2><p class="small muted">Plan your week and today's meals show up here to tick off.</p><a class="btn" href="#plan">Plan my week</a></section>`}
+    ${budget > 0 ? `<a class="card money-line" href="#money"><span class="grow"><span class="small muted">Groceries left${days ? ` · ${days} day${days === 1 ? '' : 's'} to payday` : ''}</span><b class="num ${left < 0 ? 'bad-text' : ''}">${money0(left)}</b></span><span aria-hidden="true">›</span></a>`
+      : `<a class="banner" href="#me"><b>Set your monthly grocery budget</b><span class="small">Tap your initial at the top → Money.</span></a>`}`;
+  view.onclick = async (e) => {
+    const eat = e.target.closest('[data-eat]');
+    if (eat) { try { await eatMeal(eat.dataset.eat, eat.dataset.eaten === '1'); } catch (er) { fail(er); } return renderToday(); }
+    const home = e.target.closest('[data-home]');
+    if (home) return home.dataset.home === 'fridge' ? fridgeSheet() : takeawaySheet(() => renderToday());
+  };
+}
+
 /* ---------- home: meals ready + takeaways ---------- */
 function homeCardsHtml(fridge, takeaway, lastShop) {
   const portions = fridge.reduce((s, f) => s + f.portions, 0);
@@ -843,7 +877,7 @@ function todayHtml(meals, fridge) {
   </section>`;
 }
 
-const refreshHome = () => { if (location.hash === '' || location.hash === '#list') route(); };
+const refreshHome = () => { if (['', '#today', '#shop', '#list', '#kitchen'].includes(location.hash)) route({ keep: true }); };
 
 function fridgeSheet() {
   const useBy = (f) => {
@@ -954,7 +988,7 @@ function takeawaySheet(onClose = refreshHome) {
         <button class="btn primary block">Log it</button>
       </form>
       ${t.items.length ? `<h3>This week</h3><ul class="list card flush">${t.items.map((i) => `<li><div class="grow"><div class="name">${esc(i.note || 'Takeaway')}</div><div class="sub">${esc(i.trip_date)}</div></div><b class="num">${money(i.total)}</b><button class="icon-btn" data-del="${i.id}" aria-label="Delete">✕</button></li>`).join('')}</ul>` : ''}
-      <p class="small muted">Weekly allowance ${money0(t.weekly)}. Change it on the Budget tab.</p>`,
+      <p class="small muted">Weekly allowance ${money0(t.weekly)}. Change it under Me (your initial at the top).</p>`,
     onClose);
     setTimeout(() => { const i = sheetBody.querySelector('[name=total]'); if (i) i.focus(); }, 60);
     sheetBody.oninput = (e) => {
@@ -1084,8 +1118,7 @@ let listPoll = null;
 function startListPoll() {
   clearInterval(listPoll);
   listPoll = setInterval(async () => {
-    const onList = location.hash === '' || location.hash === '#list';
-    if (!onList) { clearInterval(listPoll); return; }
+    if (!onShop()) { clearInterval(listPoll); return; }
     if (!sheet.hidden || document.visibilityState !== 'visible' || ['INPUT', 'TEXTAREA', 'SELECT'].includes((document.activeElement || {}).tagName)) return;
     if (S.pendingDel.size || S.pendingClear) return;
     try {
@@ -1095,7 +1128,7 @@ function startListPoll() {
   }, 15000);
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && sheet.hidden && (location.hash === '' || location.hash === '#list')) renderList();
+  if (document.visibilityState === 'visible' && sheet.hidden && onShop()) renderList();
 });
 
 function checkoutSheet(estimate) {
@@ -1299,6 +1332,7 @@ async function renderProducts() {
   await loadProducts();
   const q = (store.get('prodSearch', '') || '').toLowerCase();
   view.innerHTML = `
+    <button type="button" class="card fridge-line" data-act="fridge" id="fridgeLine"><span class="grow"><span class="small muted">Fridge and freezer</span><b>Meals ready</b></span><span aria-hidden="true">›</span></button>
     <div class="row">
       <input id="prodSearch" class="grow" placeholder="Search products" value="${esc(q)}" autocomplete="off">
       <button class="btn" data-act="scan" aria-label="Scan">📷</button>
@@ -1310,6 +1344,13 @@ async function renderProducts() {
     <div id="offBanner"></div>
     <section class="card flush"><ul class="list" id="prodList"></ul></section>`;
   const listEl = document.getElementById('prodList');
+  api('fridge.list').then(({ fridge }) => {
+    const el = document.getElementById('fridgeLine');
+    if (!el) return;
+    const n = fridge.reduce((t, f) => t + f.portions, 0);
+    const frozen = fridge.filter((f) => f.location === 'freezer').reduce((t, f) => t + f.portions, 0);
+    el.querySelector('b').textContent = n ? `${fmtQty(n)} meal${n === 1 ? '' : 's'} ready${frozen ? `, ${fmtQty(frozen)} frozen` : ''}` : 'Nothing cooked yet';
+  }).catch(() => {});
   const offBanner = () => {
     const n = S.offPending || 0;
     document.getElementById('offBanner').innerHTML = n ? `<button type="button" class="banner block-btn" data-act="off-refresh"><b>Get health ratings for ${n} scanned product${n === 1 ? '' : 's'}</b><span class="small">Nutri-Score, processing level and additives from Open Food Facts.</span></button>` : '';
@@ -1349,6 +1390,7 @@ async function renderProducts() {
     const sortBtn = e.target.closest('[data-sort]');
     if (sortBtn) { store.set('prodSort', sortBtn.dataset.sort); view.querySelectorAll('[data-sort]').forEach((b) => b.classList.toggle('active', b === sortBtn)); return draw(); }
     const act = e.target.closest('[data-act]');
+    if (act && act.dataset.act === 'fridge') return fridgeSheet();
     if (act && act.dataset.act === 'off-refresh') {
       act.disabled = true;
       try {
@@ -1392,7 +1434,7 @@ function productEditor(p, { addToList = false } = {}) {
 
       <label>At home now (${esc(p.unit === 'each' ? 'items' : p.unit || 'each')}) <input name="pantry" type="number" inputmode="decimal" step="0.001" min="0" value="${p.pantry ? round(p.pantry, 3) : ''}" placeholder="0"></label>
       <fieldset><legend>Price per pack</legend>
-        ${S.stores.map((s) => `<label>${esc(s.name)} <input name="price_${s.id}" type="number" inputmode="decimal" step="0.01" min="0" value="${p.prices && p.prices[s.id] ? p.prices[s.id].price : ''}"></label>`).join('') || '<p class="muted small">Add shops on the Budget tab first.</p>'}
+        ${S.stores.map((s) => `<label>${esc(s.name)} <input name="price_${s.id}" type="number" inputmode="decimal" step="0.01" min="0" value="${p.prices && p.prices[s.id] ? p.prices[s.id].price : ''}"></label>`).join('') || '<p class="muted small">Add shops under Me (your initial at the top) first.</p>'}
       </fieldset>
 
       <fieldset class="stack"><legend id="nutLegend"></legend>
@@ -1577,7 +1619,7 @@ function offConsentSheet(pid) {
     </ul>
     <button type="button" class="btn primary block" data-share="1">Yes, share products I add</button>
     <button type="button" class="btn block" data-share="0">No thanks</button>
-    <p class="small muted">You can change this any time under Budget → Settings.</p>`, () => { if (!answered) S.offShare = ''; });
+    <p class="small muted">You can change this any time under Me.</p>`, () => { if (!answered) S.offShare = ''; });
   sheetBody.onclick = async (e) => {
     const b = e.target.closest('[data-share]');
     if (!b) return;
@@ -2031,6 +2073,7 @@ async function renderRecipes() {
   const home = recipes.filter((r) => !r.mine && r.household);
   const others = recipes.filter((r) => !r.mine && !r.household);
   view.innerHTML = `
+    ${planSwitch('recipes')}
     <button class="btn primary block" data-act="new">＋ New recipe</button>
     ${mine.length ? mine.map(card).join('') : '<p class="empty">No recipes of your own yet. Add the meals you prep, or copy one below and make it yours.</p>'}
     ${home.length ? `<h2 class="section-h">From ${esc(S.household ? S.household.name : 'your household')}</h2><p class="small muted">Plan and cook from these. Only the person who added one can change it.</p>${home.map(card).join('')}` : ''}
@@ -2280,7 +2323,7 @@ function cookMode(r, portions, opts = {}) {
             closeSheet();
             toast(`${fmtQty(portions)} portions in the fridge`);
             if (opts.onDone) opts.onDone();
-            else if (location.hash === '' || location.hash === '#list') route();
+            else refreshHome();
           } catch (er) { fail(er); }
           return;
         }
@@ -2440,6 +2483,9 @@ function fmtAmount(amount, unit) {
   return `${round(amount, 2)} ${unit}`;
 }
 
+/** Plan and Recipes share the Plan tab. */
+const planSwitch = (on) => `<nav class="seg plan-switch" aria-label="Plan or recipes"><a href="#plan" class="${on === 'plan' ? 'on' : ''}" ${on === 'plan' ? 'aria-current="page"' : ''}>Week</a><a href="#recipes" class="${on === 'recipes' ? 'on' : ''}" ${on === 'recipes' ? 'aria-current="page"' : ''}>Recipes</a></nav>`;
+
 async function renderPlan() {
   const start = parseIso(store.get('planWeek', iso(mondayOf(new Date()))));
   const end = addDays(start, 6);
@@ -2480,7 +2526,8 @@ async function renderPlan() {
       </div>
     </div>
 
-    <button class="btn primary block" data-act="wizard">${entries.length ? 'Re-plan this week' : 'Plan my week'}</button>
+    ${planSwitch('plan')}
+    <button class="btn ${entries.length ? '' : 'primary'} block" data-act="wizard">${entries.length ? 'Re-plan this week' : 'Plan my week'}</button>
 
     <div class="row between">
       <div class="week-nav">
@@ -2547,7 +2594,7 @@ async function renderPlan() {
           if (!confirm('Replace the plan items on your shopping list with what this week needs?')) return;
           const r = await api('plan.to_list', { from: iso(start), to: iso(end) });
           toast(`${r.added} item${r.added === 1 ? '' : 's'} on the list`);
-          location.hash = '#list';
+          location.hash = '#shop';
           return;
         }
         case 'copy': {
@@ -2574,7 +2621,7 @@ function perPersonHtml(dayEntries) {
       <div class="row between"><span class="muted">You eat</span><span><b>${Math.round(protein)} g</b> protein · <b>${Math.round(kj).toLocaleString('en-ZA')}</b> kJ</span></div>
       ${me.protein_target_g ? `<div class="row between"><span class="muted">Your protein target</span><span>${me.protein_target_g} g</span></div>${bar(protein, me.protein_target_g)}` : ''}
       ${me.kj_target ? `<div class="row between"><span class="muted">Your kJ target</span><span>${me.kj_target.toLocaleString('en-ZA')} kJ</span></div>${bar(kj, me.kj_target)}` : ''}
-      ${!me.protein_target_g && !me.kj_target ? '<span class="muted">Set your daily targets on the Budget tab.</span>' : ''}
+      ${!me.protein_target_g && !me.kj_target ? '<span class="muted">Set your daily targets under Me (your initial at the top).</span>' : ''}
     </div>`;
 }
 
@@ -2766,7 +2813,8 @@ async function planAddSheet(date, recipeId = null) {
 }
 
 /* ================= BUDGET ================= */
-async function renderBudget() {
+async function renderBudget(mode = 'money') {
+  const again = () => renderBudget(mode);
   const day = store.get('budgetDate', null);
   const b = await api('budget.get', day ? { date: day } : {});
   S.aisles = b.aisle_order || [];
@@ -2778,7 +2826,60 @@ async function renderBudget() {
   const monthLabel = per.label;
   const dayShift = (d, n) => { const x = parseIso(d); x.setDate(x.getDate() + n); return iso(x); };
 
-  view.innerHTML = `
+  view.innerHTML = mode === 'me' ? `
+    <section class="card me-card">
+      <div class="avatar" aria-hidden="true">${esc(((S.user.display_name || S.user.username || '?').trim()[0] || '?').toUpperCase())}</div>
+      <div class="grow"><b>${esc(S.user.display_name)}</b><div class="small muted">@${esc(S.user.username)}${S.household ? ` · ${esc(S.household.name)}` : ''}</div></div>
+      <button class="btn small" data-act="rename">Edit name</button>
+    </section>
+
+    <section class="card stack">
+      <h2>Daily targets</h2>
+      <form class="stack" id="targets">
+        <div class="grid2">
+          <label>Protein (g) <input name="protein" type="number" inputmode="numeric" min="0" step="1" value="${(S.users.find((u) => u.id === S.user.id) || {}).protein_target_g ?? ''}"></label>
+          <label>Energy (kJ) <input name="kj" type="number" inputmode="numeric" min="0" step="1" value="${(S.users.find((u) => u.id === S.user.id) || {}).kj_target ?? ''}"></label>
+        </div>
+        <button class="btn">Save targets</button></form>
+    </section>
+
+    <section class="card stack">
+      <h2>Money</h2>
+      <form class="row" id="budgetForm"><label class="grow">Monthly grocery budget (R) <input name="monthly_budget" type="number" inputmode="decimal" step="0.01" min="0" value="${b.budget}"></label><button class="btn">Save</button></form>
+      <form class="row" id="paydayForm"><label class="grow">Payday (day of the month) <input name="payday" type="number" inputmode="numeric" min="1" max="31" step="1" value="${b.payday || 1}"></label><button class="btn">Save</button></form>
+      <p class="small muted">When payday falls on a weekend or public holiday, the pay month starts on the working day before, the way salaries are paid.</p>
+      <form class="row" id="taWeekly"><label class="grow">Weekly takeaway allowance (R) <input name="weekly" type="number" inputmode="decimal" step="0.01" min="0" value="${b.takeaway_weekly}"></label><button class="btn">Save</button></form>
+    </section>
+
+    <section class="card stack">
+      <h2>Household</h2>
+      <button class="btn block" data-act="household">${S.household ? `${esc(S.household.name)} · ${S.household.mode === 'shared' ? 'shared kitchen' : 'separate kitchens'} · ${S.household.members.length} ${S.household.members.length === 1 ? 'person' : 'people'}` : 'Start a household or invite someone'}</button>
+    </section>
+
+    <section class="card stack">
+      <h2>Shopping</h2>
+      <div class="small muted">Your shops</div>
+      <ul class="list">${S.stores.map((s) => `<li><span class="grow">${esc(s.name)}</span><button class="btn small" data-rename="${s.id}">Rename</button><button class="icon-btn" data-del-store="${s.id}" aria-label="Delete">✕</button></li>`).join('')}</ul>
+      <form class="row" id="storeForm"><input name="name" class="grow" placeholder="Add a shop"><button class="btn">Add</button></form>
+      <div class="stack tight"><span class="small muted">Aisle order (how the shopping list is grouped)</span>
+        <ul class="list card flush" id="aisleEd">${(S.aisles || []).map((a, i) => `<li><span class="grow">${esc(a)}</span><button type="button" class="icon-btn" data-aisle-up="${i}" aria-label="Move ${esc(a)} up" ${i ? '' : 'disabled'}>↑</button><button type="button" class="icon-btn" data-aisle-del="${i}" aria-label="Remove ${esc(a)}">✕</button></li>`).join('')}</ul>
+        <form class="row" id="aisleAdd"><input name="aisle" class="grow" placeholder="Add an aisle"><button class="btn">Add</button></form>
+      </div>
+      ${S.offReady ? `<div class="toggle-row static"><span class="grow"><b>Share products I add with Open Food Facts</b><span class="small muted block">Only product facts and label photos, so the next person's scan works. Never your name, prices or lists.</span></span>
+        <button type="button" class="switch ${S.offShare === '1' ? 'on' : ''}" data-act="off-share" aria-pressed="${S.offShare === '1'}" aria-label="Share products with Open Food Facts"><i></i></button></div>` : ''}
+    </section>
+
+    <button class="btn block" data-act="feedback">Tell us what to fix or add</button>
+
+    <section class="card stack">
+      <h2>Account and data</h2>
+      <div class="row"><button class="btn small grow" data-act="password">Change password</button><button class="btn small grow" data-act="logout">Log out</button></div>
+      <div class="row"><button class="btn small grow" data-act="export">Download my data</button><a class="btn small grow" href="./?privacy">How your data is kept</a></div>
+      <button class="btn small danger block" data-act="delete-account">Delete my account</button>
+    </section>
+    ${S.isAdmin ? '<section class="card stack"><h2>Running the app</h2><div class="row"><button class="btn grow" data-act="admin">People</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div></section>' : ''}
+    <p class="small muted" id="dispCheck"></p>
+` : `
     <div class="row">
       <button class="btn small" data-day="${dayShift(per.start, -1)}" aria-label="Previous pay month">‹</button>
       <button class="btn small grow" data-day="">${esc(monthLabel)}</button>
@@ -2812,43 +2913,10 @@ async function renderBudget() {
         <b class="num">${money(t.total)}</b><button class="icon-btn" data-del-trip="${t.id}" aria-label="Delete">✕</button></li>`).join('') || '<li class="empty">No shops logged yet.</li>'}</ul>
     </section>
 
-    <section class="card stack">
-      <h2>Settings</h2>
-      <form class="row" id="budgetForm"><label class="grow">Monthly grocery budget (R) <input name="monthly_budget" type="number" inputmode="decimal" step="0.01" min="0" value="${b.budget}"></label><button class="btn">Save</button></form>
-      <form class="row" id="paydayForm"><label class="grow">Payday (day of the month) <input name="payday" type="number" inputmode="numeric" min="1" max="31" step="1" value="${b.payday || 1}"></label><button class="btn">Save</button></form>
-      <p class="small muted">When payday falls on a weekend or public holiday, the pay month starts on the working day before, the way salaries are paid.</p>
-      <form class="stack" id="targets"><span class="small muted">My daily targets</span>
-        <div class="grid2">
-          <label>Protein (g) <input name="protein" type="number" inputmode="numeric" min="0" value="${(S.users.find((u) => u.id === S.user.id) || {}).protein_target_g ?? ''}"></label>
-          <label>Energy (kJ) <input name="kj" type="number" inputmode="numeric" min="0" value="${(S.users.find((u) => u.id === S.user.id) || {}).kj_target ?? ''}"></label>
-        </div>
-        <button class="btn">Save targets</button></form>
-      <div class="stack tight"><span class="small muted">Aisle order (how the shopping list is grouped)</span>
-        <ul class="list card flush" id="aisleEd">${(S.aisles || []).map((a, i) => `<li><span class="grow">${esc(a)}</span><button type="button" class="icon-btn" data-aisle-up="${i}" aria-label="Move ${esc(a)} up" ${i ? '' : 'disabled'}>↑</button><button type="button" class="icon-btn" data-aisle-del="${i}" aria-label="Remove ${esc(a)}">✕</button></li>`).join('')}</ul>
-        <form class="row" id="aisleAdd"><input name="aisle" class="grow" placeholder="Add an aisle"><button class="btn">Add</button></form>
-      </div>
-      <form class="row" id="taWeekly"><label class="grow">Weekly takeaway allowance (R) <input name="weekly" type="number" inputmode="decimal" step="0.01" min="0" value="${b.takeaway_weekly}"></label><button class="btn">Save</button></form>
-      <div>
-        <div class="small muted">Shops</div>
-        <ul class="list">${S.stores.map((s) => `<li><span class="grow">${esc(s.name)}</span><button class="btn small" data-rename="${s.id}">Rename</button><button class="icon-btn" data-del-store="${s.id}" aria-label="Delete">✕</button></li>`).join('')}</ul>
-        <form class="row" id="storeForm"><input name="name" class="grow" placeholder="Add a shop"><button class="btn">Add</button></form>
-      </div>
-      <p class="small muted">Logged in as ${esc(S.user.display_name)}.</p>
-      <div class="row"><button class="btn small grow" data-act="password">Change password</button><button class="btn small grow" data-act="logout">Log out</button></div>
-      ${S.offReady ? `<div class="toggle-row static"><span class="grow"><b>Share products I add with Open Food Facts</b><span class="small muted block">Only product facts and label photos, so the next person's scan works. Never your name, prices or lists.</span></span>
-        <button type="button" class="switch ${S.offShare === '1' ? 'on' : ''}" data-act="off-share" aria-pressed="${S.offShare === '1'}" aria-label="Share products with Open Food Facts"><i></i></button></div>` : ''}
-      <div class="stack tight"><span class="small muted">Household</span>
-        <button class="btn block" data-act="household">${S.household ? `${esc(S.household.name)} · ${S.household.mode === 'shared' ? 'shared kitchen' : 'separate kitchens'} · ${S.household.members.length} ${S.household.members.length === 1 ? 'person' : 'people'}` : 'Start a household or invite someone'}</button>
-      </div>
-      <button class="btn block" data-act="feedback">Tell us what to fix or add</button>
-      <div class="stack tight"><span class="small muted">Your data</span>
-        <div class="row"><button class="btn small grow" data-act="rename">Change my name</button><button class="btn small grow" data-act="export">Download my data</button></div>
-        <div class="row"><a class="btn small grow" href="./?privacy">How your data is kept</a><button class="btn small grow danger" data-act="delete-account">Delete my account</button></div>
-      </div>
-      ${S.isAdmin ? '<div class="row"><button class="btn grow" data-act="admin">People using the app</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div>' : ''}
-      <p class="small muted" id="dispCheck"></p>
-    </section>`;
-  document.getElementById('bMeter').style.width = `${Math.min(100, b.budget > 0 ? (b.spent / b.budget) * 100 : 100)}%`;
+    <a class="small muted settings-link" href="#me">Budget, payday and takeaway allowance are under Me ›</a>
+`;
+  const meter = document.getElementById('bMeter');
+  if (meter) meter.style.width = `${Math.min(100, b.budget > 0 ? (b.spent / b.budget) * 100 : 100)}%`;
 
   const dc = document.getElementById('dispCheck');
   if (dc) dc.textContent = displayCheck();
@@ -2869,7 +2937,7 @@ async function renderBudget() {
       }
       if (e.target.id === 'taWeekly') { await api('takeaway.set', { weekly: e.target.weekly.value }); toast('Takeaway allowance saved'); }
       if (e.target.id === 'storeForm') { await api('stores.add', { name: e.target.name.value }); await refreshStores(); }
-      renderBudget();
+      again();
     } catch (er) { fail(er); }
   };
   view.onclick = async (e) => {
@@ -2881,23 +2949,23 @@ async function renderBudget() {
         if (t.dataset.aisleUp) { const i = Number(t.dataset.aisleUp); [order[i - 1], order[i]] = [order[i], order[i - 1]]; }
         else order.splice(Number(t.dataset.aisleDel), 1);
         S.aisles = (await api('aisles.set', { order })).aisle_order;
-        return renderBudget();
+        return again();
       }
-      if (t.dataset.day !== undefined) { store.set('budgetDate', t.dataset.day || null); return renderBudget(); }
-      if (t.dataset.delTrip) { if (!confirm('Delete this logged shop?')) return; await api('trips.delete', { id: t.dataset.delTrip }); return renderBudget(); }
+      if (t.dataset.day !== undefined) { store.set('budgetDate', t.dataset.day || null); return again(); }
+      if (t.dataset.delTrip) { if (!confirm('Delete this logged shop?')) return; await api('trips.delete', { id: t.dataset.delTrip }); return again(); }
       if (t.dataset.delStore) {
         if (!confirm(`Delete ${storeName(t.dataset.delStore)}? All its saved prices go too.`)) return;
         await api('stores.delete', { id: t.dataset.delStore }); await refreshStores();
         if (String(S.storeId) === String(t.dataset.delStore)) S.storeId = S.stores[0] ? String(S.stores[0].id) : null;
-        return renderBudget();
+        return again();
       }
       if (t.dataset.rename) {
         const name = prompt('New name', storeName(t.dataset.rename));
         if (!name) return;
-        await api('stores.rename', { id: t.dataset.rename, name }); await refreshStores(); return renderBudget();
+        await api('stores.rename', { id: t.dataset.rename, name }); await refreshStores(); return again();
       }
       if (t.dataset.act === 'add-trip') return tripSheet();
-      if (t.dataset.act === 'log-ta') return takeawaySheet(() => renderBudget());
+      if (t.dataset.act === 'log-ta') return takeawaySheet(() => again());
       if (t.dataset.act === 'admin') return adminSheet();
       if (t.dataset.act === 'rename') {
         const name = prompt('What should the app call you?', S.user.display_name || '');
@@ -2958,7 +3026,7 @@ function tripSheet() {
     const f = e.target;
     try {
       await api('trips.add', { store_id: document.getElementById('tStore').value || null, total: f.total.value, date: f.date.value, note: f.note.value });
-      closeSheet(); renderBudget();
+      closeSheet(); route({ keep: true });
     } catch (er) { fail(er); }
   };
 }
@@ -2979,7 +3047,7 @@ function passwordSheet() {
 /** First screen for someone who just signed up: the three numbers that make the app useful. */
 function welcomeSheet() {
   openSheet(`${sheetHead(`Welcome, ${S.user.display_name}`)}
-    <p>Three quick things and the app starts working for you. You can change them any time under Budget.</p>
+    <p>Three quick things and the app starts working for you. You can change them any time under Me: tap your initial at the top.</p>
     <form class="stack" id="wlForm">
       <label>Monthly grocery budget (R) <input name="budget" type="number" inputmode="decimal" min="0" step="1" placeholder="2500"></label>
       <label>Payday (day of the month) <input name="payday" type="number" inputmode="numeric" min="1" max="31" step="1" value="25"></label>
@@ -3131,7 +3199,7 @@ function reloadKitchen(msg) {
   store.set('store', null);
   store.set('budgetDate', null);
   if (msg) store.set('flash', msg);
-  history.replaceState(null, '', '#list');
+  history.replaceState(null, '', '#today');
   location.reload();
 }
 
@@ -3224,7 +3292,7 @@ async function joinSheet(token, isNew) {
   openSheet(`${sheetHead('Join a household')}
     <p><b>${esc(p.inviter || 'Someone')}</b> invited you to join <b>${esc(p.household)}</b> (${p.members} ${p.members === 1 ? 'person' : 'people'} so far).</p>
     <p class="small muted">You'll see each other's recipes. If the household shares its kitchen, you'll use its list, plan and budget; your own are kept in case you leave.</p>
-    ${p.already ? "<p class=\"error\">You're already in a household. Leave it under Budget → Household first, then open the link again.</p>" : '<button type="button" class="btn primary block" data-act="join">Join</button>'}
+    ${p.already ? "<p class=\"error\">You're already in a household. Leave it under Me → Household first, then open the link again.</p>" : '<button type="button" class="btn primary block" data-act="join">Join</button>'}
     <button type="button" class="btn block" data-close>Not now</button>`, () => { if (isNew && !joined) welcomeSheet(); });
   sheetBody.onclick = async (e) => {
     if (!e.target.closest('[data-act=join]')) return;
@@ -3254,9 +3322,9 @@ async function joinSheet(token, isNew) {
     if (S.offReady && S.offShare === '1' && navigator.onLine) setTimeout(() => api('off.sync').catch(() => {}), 4000);   // anything left waiting
     const flash = store.get('flash', null);
     if (flash) { store.set('flash', null); setTimeout(() => toast(flash), 300); }
-    if (location.hash === '#welcome') { history.replaceState(null, '', '#list'); route(); welcomeSheet(); return; }
+    if (location.hash === '#welcome') { history.replaceState(null, '', '#today'); route(); welcomeSheet(); return; }
     const join = location.hash.match(/^#join=([0-9a-f]{48})(&new)?$/);
-    if (join) { history.replaceState(null, '', '#list'); route(); joinSheet(join[1], !!join[2]); return; }
+    if (join) { history.replaceState(null, '', '#today'); route(); joinSheet(join[1], !!join[2]); return; }
     route();
     if (S.checkin) setTimeout(() => { if (sheet.hidden) checkinSheet(S.checkin); }, 2500);
   } catch (e) {
