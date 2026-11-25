@@ -271,7 +271,11 @@ body.route-shop .view { padding-bottom: calc(var(--nav-bottom) + var(--nav-h) + 
 .nutri span { font-size: .7rem; color: var(--muted); }
 .ing { display: grid; gap: 6px; padding-bottom: 10px; border-bottom: 1px dashed var(--line-2); }
 .ing:last-child { border-bottom: 0; padding-bottom: 0; }
-.ing-row { display: grid; grid-template-columns: 84px 34px 1fr 40px; gap: 6px; align-items: center; }
+.ing-row { display: grid; grid-template-columns: 80px 84px minmax(0, 1fr) 40px; gap: 6px; align-items: center; }
+.ing-name { line-height: 1.3; }
+.ing-search { position: relative; }
+.ing-search .suggest { position: static; margin-top: 6px; }
+.new-ing { padding: 14px 16px; border-top: 1px solid var(--line); }
 .step-row { display: grid; grid-template-columns: 28px 1fr; gap: 8px; align-items: start; }
 .step-row textarea { min-height: 64px; }
 .step-row .step-tools { grid-column: 2; display: flex; gap: 6px; align-items: center; }

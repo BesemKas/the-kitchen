@@ -2104,11 +2104,12 @@ function scaleRecipe(r, portions) {
     const p = S.products.find((x) => x.id === it.product_id);
     const price = p ? priceAt(p.prices, null).price : null;
     const amount = it.amount * f;
+    const qty = it.qty === null || it.qty === undefined ? null : it.qty * f;
     const packs = Math.max(1, Math.ceil(amount / it.pack_size - 1e-6));
     const cost = price === null ? null : (amount / it.pack_size) * price;
     if (price === null) missing++;
     else { used += cost; toBuy += packs * price; }
-    return { ...it, amount, packs, cost };
+    return { ...it, amount, qty, packs, cost };
   });
   return { items, used, toBuy, missing, perPortion: used / portions };
 }
@@ -2151,7 +2152,7 @@ function recipeView(r, portions = r.servings) {
       <section class="stack">
         <h3>Ingredients</h3>
         <ul class="ing-list">${sc.items.map((it) => `<li>
-          <span class="amt num">${fmtAmount(it.amount, it.unit)}</span>
+          <span class="amt num">${ingLabel(it)}</span>
           <span class="grow">${esc(it.name)}${it.note ? `<span class="muted">, ${esc(it.note)}</span>` : ''}<span class="small muted block">buy ${it.packs} × ${fmtQty(it.pack_size)} ${unitWord(it.unit)}</span></span>
           <span class="num small">${money(it.cost)}</span></li>`).join('') || '<li class="muted">No ingredients yet.</li>'}</ul>
       </section>
@@ -2273,7 +2274,7 @@ function cookMode(r, portions, opts = {}) {
     let body;
     if (idx < 0) {
       body = `<p class="muted">Get everything out first. Amounts are for ${fmtQty(portions)} portions.</p>
-        <ul class="ing-list check">${sc.items.map((it) => `<li><label class="row grow"><input type="checkbox"><span class="amt num">${fmtAmount(it.amount, it.unit)}</span><span class="grow">${esc(it.name)}${it.note ? `<span class="muted">, ${esc(it.note)}</span>` : ''}</span></label></li>`).join('')}</ul>
+        <ul class="ing-list check">${sc.items.map((it) => `<li><label class="row grow"><input type="checkbox"><span class="amt num">${ingLabel(it)}</span><span class="grow">${esc(it.name)}${it.note ? `<span class="muted">, ${esc(it.note)}</span>` : ''}</span></label></li>`).join('')}</ul>
         <button class="btn primary block" data-act="next">${steps.length ? 'Start cooking' : 'Done cooking'}</button>`;
     } else if (idx < steps.length) {
       const s = steps[idx];
@@ -2353,11 +2354,11 @@ function cookMode(r, portions, opts = {}) {
 
 /* ---------- recipe editor ---------- */
 function recipeEditor(r) {
-  let rows = r.items.map((i) => ({ product_id: i.product_id, amount: i.amount, note: i.note || '' }));
+  // each row: the product, and the amount as typed in a unit that suits it
+  let rows = r.items.map((i) => ({ product_id: i.product_id, name: i.name, qty: i.qty ?? i.amount, qty_unit: i.qty_unit || i.unit, note: i.note || '' }));
   let steps = (r.steps && r.steps.length ? r.steps : recipeSteps(r)).map((s) => ({ body: s.body, timer_minutes: s.timer_minutes }));
   const notes = r.steps && r.steps.length ? (r.instructions || '') : '';
-  const prodOptions = (sel) => `<option value="">Choose product…</option>` + S.products.map((p) =>
-    `<option value="${p.id}" ${p.id === Number(sel) ? 'selected' : ''}>${esc(p.name)}${p.brand ? ` (${esc(p.brand)})` : ''}</option>`).join('');
+  const prodOf = (id) => S.products.find((x) => x.id === Number(id));
 
   openSheet(`${sheetHead(r.id ? 'Edit recipe' : 'New recipe')}
     <form class="stack" id="rForm">
@@ -2367,10 +2368,12 @@ function recipeEditor(r) {
         <label>Prep (min) <input name="prep_minutes" type="number" inputmode="numeric" min="0" value="${r.prep_minutes ?? ''}"></label>
         <label>Cook (min) <input name="cook_minutes" type="number" inputmode="numeric" min="0" value="${r.cook_minutes ?? ''}"></label>
       </div>
-      <fieldset><legend>Ingredients (amount in the product's unit)</legend>
+      <fieldset><legend>Ingredients</legend>
         <div id="ingRows" class="stack"></div>
-        <button type="button" class="btn small" data-act="add-ing">＋ Ingredient</button>
-        ${S.products.length ? '' : '<p class="small warn-text">Add products first. Ingredients are picked from your products.</p>'}
+        <div class="field ing-search">
+          <input id="ingFind" placeholder="Add an ingredient: type to search" autocomplete="off" enterkeyhint="search" aria-label="Search for an ingredient">
+          <div id="ingSuggest" class="suggest" hidden></div>
+        </div>
       </fieldset>
       <div class="card stack" id="rSummary"></div>
       <fieldset><legend>Method</legend>
@@ -2387,17 +2390,19 @@ function recipeEditor(r) {
 
   const drawRows = () => {
     box.innerHTML = rows.map((row, i) => {
-      const p = S.products.find((x) => x.id === Number(row.product_id));
+      const p = prodOf(row.product_id);
+      const units = p ? ingUnitsFor(p) : [row.qty_unit];
+      if (p && !units.includes(row.qty_unit)) units.unshift(row.qty_unit);
       return `<div class="ing" data-i="${i}">
-        <select data-f="product_id" aria-label="Product">${prodOptions(row.product_id)}</select>
+        <div class="ing-name"><b>${esc(p ? p.name : row.name || 'Unknown product')}</b>${p ? `<span class="small muted"> ${esc(p.brand || '')} ${packLabel(p)}</span>` : ''}</div>
         <div class="ing-row">
-          <input data-f="amount" type="number" inputmode="decimal" step="0.001" min="0" value="${row.amount ?? ''}" placeholder="${p ? p.unit : 'qty'}" aria-label="Amount">
-          <span class="small muted">${p ? (p.unit === 'each' ? 'items' : p.unit) : ''}</span>
-          <input data-f="note" value="${esc(row.note)}" placeholder="note, e.g. diced" aria-label="Note">
+          <input data-f="qty" type="number" inputmode="decimal" step="0.001" min="0" value="${row.qty ?? ''}" placeholder="how much" aria-label="Amount of ${esc(p ? p.name : '')}">
+          <select data-f="qty_unit" aria-label="Unit">${units.map((u) => `<option value="${u}" ${u === row.qty_unit ? 'selected' : ''}>${ING_LABEL[u] || u}</option>`).join('')}</select>
+          <input data-f="note" value="${esc(row.note)}" placeholder="note, e.g. grated" aria-label="Note">
           <button type="button" class="icon-btn" data-act="rm-ing" aria-label="Remove ingredient">✕</button>
         </div>
       </div>`;
-    }).join('') || '<p class="muted small">No ingredients yet.</p>';
+    }).join('') || '<p class="muted small">No ingredients yet. Search above: cheese, chicken, rice…</p>';
     summary();
   };
   const drawSteps = () => {
@@ -2414,9 +2419,9 @@ function recipeEditor(r) {
   };
   const summary = () => {
     const servings = Math.max(1, Number(form.servings.value) || 1);
-    const tmp = { servings, items: rows.filter((x) => x.product_id && x.amount).map((x) => {
-      const p = S.products.find((pp) => pp.id === Number(x.product_id));
-      return { product_id: p.id, name: p.name, unit: p.unit, pack_size: p.pack_size, amount: Number(x.amount) };
+    const tmp = { servings, items: rows.filter((x) => prodOf(x.product_id) && x.qty > 0).map((x) => {
+      const p = prodOf(x.product_id);
+      return { product_id: p.id, name: p.name, unit: p.unit, pack_size: p.pack_size, amount: ingToProductUnit(Number(x.qty), x.qty_unit, p) || 0 };
     }) };
     const sc = scaleRecipe(tmp, servings);
     document.getElementById('rSummary').innerHTML = `
@@ -2432,20 +2437,92 @@ function recipeEditor(r) {
     const st = e.target.closest('.step-row');
     if (ing) {
       const f = e.target.dataset.f;
-      rows[Number(ing.dataset.i)][f] = f === 'note' ? e.target.value : (e.target.value === '' ? null : Number(e.target.value));
-      if (f === 'product_id') drawRows(); else summary();
+      rows[Number(ing.dataset.i)][f] = f === 'note' || f === 'qty_unit' ? e.target.value : (e.target.value === '' ? null : Number(e.target.value));
+      summary();
     } else if (st) {
       const f = e.target.dataset.f;
       steps[Number(st.dataset.s)][f] = f === 'body' ? e.target.value : (e.target.value === '' ? null : Number(e.target.value));
     } else summary();
   };
-  sheetBody.onchange = (e) => { if (e.target.dataset.f === 'product_id') sheetBody.oninput(e); };
+  sheetBody.onchange = (e) => { if (e.target.dataset.f === 'qty_unit') sheetBody.oninput(e); };
+
+  // ----- ingredient search: your products first, then the whole catalogue, then "add it as new" -----
+  const find = document.getElementById('ingFind');
+  const sug = document.getElementById('ingSuggest');
+  let seq = 0;
+  const addRow = (p) => {
+    if (!prodOf(p.id)) S.products.push(p);
+    rows.push({ product_id: p.id, name: p.name, qty: null, qty_unit: ingUnitsFor(p)[0], note: '' });
+    find.value = ''; sug.hidden = true;
+    drawRows();
+    const last = box.querySelector('.ing:last-child [data-f=qty]');
+    if (last) last.focus();
+  };
+  const rank = (p, q) => {
+    const n = `${p.name} ${p.brand || ''}`.toLowerCase();
+    return (n.startsWith(q) ? 0 : n.split(/\s+/).some((w) => w.startsWith(q)) ? 1 : 2) - (p.bought_count ? 0.5 : 0);
+  };
+  const show = (list, q) => {
+    sug.innerHTML = list.slice(0, 8).map((p) => `<button type="button" data-pick="${p.id}"><span>${esc(p.name)} <span class="muted small">${esc(p.brand || '')} ${packLabel(p)}</span></span></button>`).join('')
+      + `<button type="button" data-newprod="1"><span>＋ New product “${esc(q)}”</span></button>`;
+    sug.hidden = false;
+  };
+  find.oninput = () => {
+    const q = find.value.trim().toLowerCase();
+    if (q.length < 2) { sug.hidden = true; return; }
+    const words = q.split(/\s+/);
+    const local = S.products.filter((p) => { const n = `${p.name} ${p.brand || ''}`.toLowerCase(); return words.every((w) => n.includes(w)); })
+      .sort((a, b) => rank(a, q) - rank(b, q) || a.name.localeCompare(b.name));
+    show(local, find.value.trim());
+    const mine = ++seq;
+    clearTimeout(find.t);
+    find.t = setTimeout(async () => {
+      try {
+        const { products } = await api('products.search', { q });
+        if (mine !== seq) return;
+        const seen = new Set(local.map((p) => p.id));
+        show([...local, ...products.filter((p) => !seen.has(p.id))], find.value.trim());
+      } catch { /* offline: local results are enough */ }
+    }, 300);
+  };
+  find.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); const b = sug.querySelector('button'); if (b) b.click(); } };
+  sug.onclick = async (e) => {
+    const pick = e.target.closest('[data-pick]');
+    if (pick) {
+      const id = Number(pick.dataset.pick);
+      let p = prodOf(id);
+      if (!p) { try { p = (await api('products.search', { q: find.value.trim() })).products.find((x) => x.id === id); } catch { /* ignore */ } }
+      if (p) addRow(p);
+      return;
+    }
+    if (e.target.closest('[data-newprod]')) {
+      const name = find.value.trim();
+      sug.innerHTML = `<div class="stack new-ing" id="newIng">
+        <b>New product: ${esc(name)}</b>
+        <span class="small muted">How do you buy it?</span>
+        <div class="row"><input name="size" type="number" inputmode="decimal" step="0.001" min="0" placeholder="1" aria-label="Pack size" class="grow">
+          <select name="unit" aria-label="Unit">${UNITS.map((u) => `<option value="${u}" ${u === 'kg' ? 'selected' : ''}>${u === 'each' ? 'items' : u}</option>`).join('')}</select></div>
+        <button type="button" class="btn primary" data-mkprod="1">Add ${esc(name)}</button>
+        <span class="small muted">Add its price and nutrition later under Kitchen.</span>
+      </div>`;
+      sug.querySelector('[name=size]').focus();
+      return;
+    }
+    if (e.target.closest('[data-mkprod]')) {
+      const name = find.value.trim();
+      const wrap = sug.querySelector('#newIng');
+      try {
+        const { product } = await api('products.save', { name, pack_size: wrap.querySelector('[name=size]').value || 1, unit: wrap.querySelector('[name=unit]').value });
+        addRow(product);
+      } catch (er) { fail(er); }
+    }
+  };
+  find.onblur = () => setTimeout(() => { if (!sug.contains(document.activeElement)) sug.hidden = true; }, 250);
   sheetBody.onclick = async (e) => {
     const act = e.target.closest('[data-act]');
     if (!act) return;
     const si = act.closest('.step-row') ? Number(act.closest('.step-row').dataset.s) : null;
     switch (act.dataset.act) {
-      case 'add-ing': rows.push({ product_id: null, amount: null, note: '' }); return drawRows();
       case 'rm-ing': rows.splice(Number(act.closest('.ing').dataset.i), 1); return drawRows();
       case 'add-step': steps.push({ body: '', timer_minutes: null }); drawSteps(); stepBox.querySelector('.step-row:last-child textarea').focus(); return;
       case 'rm-step': steps.splice(si, 1); return drawSteps();
@@ -2464,7 +2541,7 @@ function recipeEditor(r) {
         id: r.id, name: form.name.value, servings: form.servings.value,
         prep_minutes: form.prep_minutes.value, cook_minutes: form.cook_minutes.value,
         instructions: form.instructions.value,
-        items: rows.filter((x) => x.product_id && x.amount),
+        items: rows.filter((x) => x.product_id && x.qty > 0).map((x) => ({ product_id: x.product_id, qty: x.qty, qty_unit: x.qty_unit, note: x.note })),
         steps: steps.filter((s) => s.body && s.body.trim()),
       });
       closeSheet();
@@ -2476,6 +2553,36 @@ function recipeEditor(r) {
 }
 
 /* ================= MEAL PLAN ================= */
+/* ----- ingredient units: type "100 g" of a cheese bought per kg ----- */
+const ING_UNITS = { g: ['mass', 1], kg: ['mass', 1000], ml: ['vol', 1], l: ['vol', 1000], tsp: ['vol', 5], tbsp: ['vol', 15], cup: ['vol', 250], each: ['count', 1] };
+const ING_LABEL = { g: 'g', kg: 'kg', ml: 'ml', l: 'litre', tsp: 'tsp', tbsp: 'tbsp', cup: 'cup', each: 'each', pack: 'pack' };
+/** The units that make sense for a product, most likely first. */
+function ingUnitsFor(p) {
+  const fam = (ING_UNITS[p.unit] || ['count'])[0];
+  if (fam === 'mass') return ['g', 'kg', 'pack', 'ml'];
+  if (fam === 'vol') return ['ml', 'l', 'tsp', 'tbsp', 'cup', 'pack', 'g'];
+  return ['each', 'pack'];
+}
+/** An amount in any unit → the product's own unit (1 g counted as 1 ml between weight and volume). */
+function ingToProductUnit(qty, unit, p) {
+  if (unit === 'pack') return qty * (p.pack_size || 1);
+  const from = ING_UNITS[unit]; const to = ING_UNITS[p.unit];
+  if (!from || !to) return null;
+  if (from[0] !== to[0] && (from[0] === 'count' || to[0] === 'count')) return null;
+  return (qty * from[1]) / to[1];
+}
+/** How an ingredient line reads: "100 g", "2 tbsp", "½ pack", or the old product-unit amount. */
+function ingLabel(it) {
+  if (it.qty !== null && it.qty !== undefined && it.qty_unit) {
+    const q = it.qty_unit === 'kg' && it.qty < 1 ? [it.qty * 1000, 'g'] : it.qty_unit === 'g' && it.qty >= 1000 ? [it.qty / 1000, 'kg'] : [it.qty, it.qty_unit];
+    if (q[1] === 'pack') return `${fmtQty(q[0])} pack${q[0] > 1 ? 's' : ''}`;
+    if (q[1] === 'each') return `${fmtQty(q[0])}×`;
+    if (q[1] === 'cup') return `${fmtQty(q[0])} cup${q[0] > 1 ? 's' : ''}`;
+    return `${round(q[0], q[0] < 10 ? 2 : 0)} ${q[1]}`;
+  }
+  return fmtAmount(it.amount, it.unit);
+}
+
 function fmtAmount(amount, unit) {
   if (unit === 'g' && amount >= 1000) return `${round(amount / 1000, 2)} kg`;
   if (unit === 'ml' && amount >= 1000) return `${round(amount / 1000, 2)} l`;

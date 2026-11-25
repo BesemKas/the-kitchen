@@ -271,6 +271,10 @@ const MIGRATIONS = [
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
         ) ENGINE=InnoDB",
     ],
+    // recipe ingredients remember the amount and unit as typed ("100 g", "2 tbsp", "half a pack")
+    14 => [
+        "ALTER TABLE recipe_items ADD COLUMN qty DECIMAL(10,3) NULL, ADD COLUMN qty_unit VARCHAR(8) NULL",
+    ],
 ];
 
 function schema_version(): int
