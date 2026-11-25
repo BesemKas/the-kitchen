@@ -123,3 +123,12 @@ Shared between everyone:
 - **product facts** that recipes are built from: name, brand, barcode, pack size, nutrition and aisle
 
 A shared recipe is costed with the prices of the person looking at it.
+
+## Health info and label photos
+
+- **Nutri-Score (A–E), processing level (NOVA 1–4) and additives** come from Open Food Facts when it has the product. Products → "Get health ratings" checks every scanned product. Additives are also picked up from E-numbers in a typed ingredient list.
+- **Protein per rand** ("R per 10 g protein") shows on products and recipes. Products → "Cheapest protein" ranks protein-rich foods first: those that get at least 20% of their energy from protein.
+- **Label form:** type the per 100 g column in the label's order. The app warns when energy doesn't match protein, carbs and fat, which catches per-serving numbers. "Standard values" fills approximate USDA numbers for loose and butchery food (raw or uncooked weight).
+- **Label photos** are saved with the product (shrunk to about 150 KB) and only shown to logged-in users.
+- **Reading labels from photos (optional):** add `'anthropic_key' => 'sk-ant-…'` to `app/config.php`. Each photo is then read by Claude (`claude-haiku-5-5`, about a cent per label) and the form is filled in for you to check. Leave the key out and photos are only kept for reference.
+- **Weighed meat and deli barcodes** (13 digits starting with 2) are shop labels holding a price, not a product, so the app asks which product it is.

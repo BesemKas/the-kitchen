@@ -7,4 +7,7 @@ return [
     'db_pass' => 'change-me',
     'timezone' => 'Africa/Johannesburg',
     'currency' => 'R',
+    // Optional: read nutrition labels from photos with Claude (about a cent per label).
+    // Create a key at console.anthropic.com and paste it here. Leave empty to keep it off.
+    'anthropic_key' => '',
 ];

@@ -115,6 +115,28 @@ const MIGRATIONS = [
             ON DUPLICATE KEY UPDATE bought_count = VALUES(bought_count), last_bought = VALUES(last_bought)",
         "ALTER TABLE products DROP COLUMN bought_count, DROP COLUMN last_bought",
     ],
+    8 => [
+        // health info (shared product facts): Nutri-Score and NOVA from Open Food Facts, additives, ingredients
+        "ALTER TABLE products
+            ADD COLUMN nutriscore CHAR(1) NULL,
+            ADD COLUMN nova TINYINT UNSIGNED NULL,
+            ADD COLUMN additives VARCHAR(400) NULL,
+            ADD COLUMN ingredients TEXT NULL,
+            ADD COLUMN off_checked_at DATETIME NULL",
+        // label photos, kept as base64 text so backups stay plain SQL
+        "CREATE TABLE product_photos (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            product_id INT UNSIGNED NOT NULL,
+            kind VARCHAR(12) NOT NULL DEFAULT 'label',
+            mime VARCHAR(20) NOT NULL DEFAULT 'image/jpeg',
+            data MEDIUMTEXT NOT NULL,
+            user_id INT UNSIGNED NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX (product_id),
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+    ],
 ];
 
 function schema_version(): int

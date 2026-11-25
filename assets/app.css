@@ -384,3 +384,18 @@ html, body { overscroll-behavior-y: contain; }
 body.typing .tabs { display: none; }
 body.typing .addbar { bottom: 8px; }
 .probe { position: fixed; visibility: hidden; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+
+/* health badges */
+.badges { display: inline-flex; gap: 4px; vertical-align: 2px; margin-left: 4px; flex-wrap: wrap; }
+.badges .tag { margin-left: 0; }
+.ns, .nova { display: inline-block; min-width: 20px; padding: 1px 6px; border-radius: 6px; font-size: 11px; font-weight: 800; text-align: center; line-height: 16px; }
+.ns-a { background: #038141; color: #fff; } .ns-b { background: #85bb2f; color: #102000; } .ns-c { background: #fecb02; color: #2a2000; }
+.ns-d { background: #ee8100; color: #fff; } .ns-e { background: #e63e11; color: #fff; }
+.nova { background: var(--surface-2, #222a27); color: var(--muted); border: 1px solid var(--line-2); font-weight: 700; }
+.nova-1, .nova-2 { color: var(--good, #8fd694); } .nova-3 { color: var(--warn); } .nova-4 { color: var(--bad); }
+.protein-cost { color: var(--accent); font-weight: 600; }
+.photo-box { display: flex; gap: 8px; flex-wrap: wrap; }
+.photo-box img { width: 120px; height: 120px; object-fit: cover; border-radius: 12px; border: 1px solid var(--line-2); }
+.photo-box label { width: 100%; }
+.banner.block-btn { width: 100%; text-align: left; background: transparent; cursor: pointer; font: inherit; display: grid; gap: 2px; }
+.gap { gap: 8px; }

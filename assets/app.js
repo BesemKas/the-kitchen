@@ -16,6 +16,71 @@ const NUTRIENTS = [
   ['fat_g', 'Fat', 'g'], ['satfat_g', 'Sat. fat', 'g'], ['fibre_g', 'Fibre', 'g'], ['sodium_mg', 'Sodium', 'mg'],
 ];
 
+/* ---------- health ---------- */
+/** Rand per 10 g of protein for a pack at a price (needs protein per 100 g, or per item for 'each'). */
+function proteinCost(p, price) {
+  if (!p || price === null || price === undefined || !(p.protein_g > 0) || !(p.pack_size > 0)) return null;
+  const grams = { g: 1, kg: 1000, ml: 1, l: 1000 }[p.unit];
+  const protein = grams ? (p.protein_g * p.pack_size * grams) / 100 : p.protein_g * p.pack_size;
+  return protein > 0 ? (price / protein) * 10 : null;
+}
+/** Share of the energy that comes from protein (17 kJ per g). */
+const proteinShare = (p) => (p.energy_kj > 0 && p.protein_g > 0 ? Math.min(1, (17 * p.protein_g) / p.energy_kj) : 0);
+const proteinLabel = (v) => (v === null ? '' : `${money(v)} per 10 g protein`);
+const NOVA = { 1: 'Unprocessed', 2: 'Cooking ingredient', 3: 'Processed', 4: 'Ultra-processed' };
+/** Nutri-Score, NOVA and additive badges (only what's known). */
+function healthBadges(p, { long = false } = {}) {
+  const out = [];
+  if (p.nutriscore) out.push(`<span class="ns ns-${p.nutriscore}" title="Nutri-Score ${p.nutriscore.toUpperCase()}">${p.nutriscore.toUpperCase()}</span>`);
+  if (p.nova) out.push(`<span class="nova nova-${p.nova}" title="NOVA ${p.nova}: ${NOVA[p.nova]}">${long ? NOVA[p.nova] : `N${p.nova}`}</span>`);
+  if (p.additives && p.additives.length) out.push(`<span class="tag">${p.additives.length} additive${p.additives.length === 1 ? '' : 's'}</span>`);
+  return out.length ? `<span class="badges">${out.join('')}</span>` : '';
+}
+/** Approximate standard values per 100 g raw/dry (eggs per egg), for loose and butchery items without a label. Source: USDA FoodData Central. */
+const STANDARD_FOODS = [
+  ['Chicken breast, raw, skinless', 'g', { energy_kj: 502, protein_g: 22.5, carbs_g: 0, sugar_g: 0, fat_g: 2.6, satfat_g: 0.6, fibre_g: 0, sodium_mg: 45 }],
+  ['Chicken thighs, raw, with skin', 'g', { energy_kj: 925, protein_g: 16.5, carbs_g: 0, sugar_g: 0, fat_g: 16.6, satfat_g: 4.8, fibre_g: 0, sodium_mg: 74 }],
+  ['Beef mince, raw (about 20% fat)', 'g', { energy_kj: 1063, protein_g: 17.2, carbs_g: 0, sugar_g: 0, fat_g: 20, satfat_g: 7.6, fibre_g: 0, sodium_mg: 66 }],
+  ['Beef mince, lean, raw (about 10% fat)', 'g', { energy_kj: 736, protein_g: 20, carbs_g: 0, sugar_g: 0, fat_g: 10, satfat_g: 3.9, fibre_g: 0, sodium_mg: 66 }],
+  ['Eggs, whole (per large egg)', 'each', { energy_kj: 299, protein_g: 6.3, carbs_g: 0.4, sugar_g: 0.2, fat_g: 4.8, satfat_g: 1.6, fibre_g: 0, sodium_mg: 71 }],
+  ['White rice, uncooked', 'g', { energy_kj: 1527, protein_g: 7.1, carbs_g: 80, sugar_g: 0.1, fat_g: 0.7, satfat_g: 0.2, fibre_g: 1.3, sodium_mg: 5 }],
+  ['Brown rice, uncooked', 'g', { energy_kj: 1548, protein_g: 7.9, carbs_g: 77, sugar_g: 0.9, fat_g: 2.9, satfat_g: 0.6, fibre_g: 3.5, sodium_mg: 7 }],
+  ['Rolled oats, uncooked', 'g', { energy_kj: 1586, protein_g: 13.2, carbs_g: 67.7, sugar_g: 1, fat_g: 6.5, satfat_g: 1.1, fibre_g: 10.1, sodium_mg: 6 }],
+  ['Pasta, uncooked', 'g', { energy_kj: 1552, protein_g: 13, carbs_g: 75, sugar_g: 2.7, fat_g: 1.5, satfat_g: 0.3, fibre_g: 3.2, sodium_mg: 6 }],
+  ['Potatoes, raw', 'g', { energy_kj: 322, protein_g: 2, carbs_g: 17.5, sugar_g: 0.8, fat_g: 0.1, satfat_g: 0, fibre_g: 2.2, sodium_mg: 6 }],
+  ['Sweet potato, raw', 'g', { energy_kj: 360, protein_g: 1.6, carbs_g: 20, sugar_g: 4.2, fat_g: 0.1, satfat_g: 0, fibre_g: 3, sodium_mg: 55 }],
+  ['Broccoli, raw', 'g', { energy_kj: 142, protein_g: 2.8, carbs_g: 6.6, sugar_g: 1.7, fat_g: 0.4, satfat_g: 0, fibre_g: 2.6, sodium_mg: 33 }],
+  ['Onion, raw', 'g', { energy_kj: 167, protein_g: 1.1, carbs_g: 9.3, sugar_g: 4.2, fat_g: 0.1, satfat_g: 0, fibre_g: 1.7, sodium_mg: 4 }],
+  ['Milk, full cream', 'ml', { energy_kj: 255, protein_g: 3.2, carbs_g: 4.8, sugar_g: 5.1, fat_g: 3.3, satfat_g: 1.9, fibre_g: 0, sodium_mg: 43 }],
+  ['Tuna, canned in water, drained', 'g', { energy_kj: 485, protein_g: 25.5, carbs_g: 0, sugar_g: 0, fat_g: 0.8, satfat_g: 0.2, fibre_g: 0, sodium_mg: 338 }],
+  ['Peanut butter, smooth', 'g', { energy_kj: 2460, protein_g: 25, carbs_g: 20, sugar_g: 9, fat_g: 50, satfat_g: 10, fibre_g: 6, sodium_mg: 459 }],
+];
+/** Energy from the macros (kJ per g: protein 17, carbs 17, fat 37, fibre 8) vs the label. Returns a warning or ''. */
+function energyCheck(n) {
+  const kj = Number(n.energy_kj); const P = Number(n.protein_g) || 0; const C = Number(n.carbs_g) || 0; const F = Number(n.fat_g) || 0; const Fi = Number(n.fibre_g) || 0;
+  if (!(kj > 40) || (P + C + F) === 0) return '';
+  const est = 17 * P + 17 * C + 37 * F + 8 * Fi;
+  if (Math.abs(est - kj) / kj <= 0.15) return '';
+  return `Energy doesn't add up: ${Math.round(kj)} kJ on the form, but the protein, carbs and fat add up to about ${Math.round(est)} kJ. Check you used the per 100 g column, not per serving.`;
+}
+/** Shrink a camera photo to at most 1400 px JPEG, as base64 (no data: prefix). */
+function shrinkPhoto(file, max = 1400) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.82).split(',')[1]);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Couldn't open that photo")); };
+    img.src = url;
+  });
+}
+
 const store = {
   get(k, d = null) { try { const v = localStorage.getItem('kb_' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem('kb_' + k, JSON.stringify(v)); } catch { /* private mode */ } },
@@ -465,6 +530,7 @@ async function loadProducts() {
   const r = await api('products.list');
   S.products = r.products;
   S.aisles = r.aisle_order || [];
+  S.offPending = r.off_pending || 0;
   return S.products;
 }
 
@@ -1020,6 +1086,7 @@ async function scanFlow(from) {
         toast("Offline: this barcode isn't saved yet. Add it by name for now and scan it again when you have signal.");
         return;
       }
+      if (r.instore) return pickProductSheet(from, "That's the shop's own label for weighed meat or deli: it holds a price, not a product. Which product is it?");
       if (r.product) {
         if (from === 'list') return quickAddSheet(r.product);
         return productEditor(r.product);
@@ -1029,9 +1096,35 @@ async function scanFlow(from) {
       productEditor({
         id: null, barcode: r.barcode, name: s.name || '', brand: s.brand || '', pack_size: s.pack_size || 1,
         unit: s.unit || 'each', category: '', prices: {}, ...(s.nutrition || {}),
+        nutriscore: s.nutriscore || null, nova: s.nova || null, additives: s.additives || [], ingredients: s.ingredients || '',
       }, { addToList: from === 'list' });
     } catch (er) { fail(er); }
   });
+}
+
+/** Choose an existing product (for barcodes that don't identify one). */
+async function pickProductSheet(from, hint) {
+  await loadProducts();
+  openSheet(`${sheetHead('Which product?')}
+    <p class="small muted">${esc(hint)}</p>
+    <input id="pkSearch" placeholder="Search your products" autocomplete="off">
+    <ul class="list" id="pkList"></ul>
+    <button type="button" class="btn block" data-act="new">New product</button>`);
+  const draw = () => {
+    const t = document.getElementById('pkSearch').value.trim().toLowerCase();
+    document.getElementById('pkList').innerHTML = S.products.filter((p) => !t || `${p.name} ${p.brand || ''}`.toLowerCase().includes(t))
+      .map((p) => `<li class="tap" data-pid="${p.id}"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${[esc(p.brand || ''), packLabel(p)].filter(Boolean).join(' · ')}</div></div></li>`).join('') || '<li class="empty">No matches.</li>';
+  };
+  draw();
+  sheetBody.oninput = (e) => { if (e.target.id === 'pkSearch') draw(); };
+  sheetBody.onclick = (e) => {
+    if (e.target.closest('[data-act=new]')) { closeSheet(); return productEditor({ id: null, name: '', brand: '', barcode: '', pack_size: 1, unit: 'kg', category: 'Meat & fish', prices: {} }, { addToList: from === 'list' }); }
+    const li = e.target.closest('[data-pid]');
+    if (!li) return;
+    const p = S.products.find((x) => x.id === Number(li.dataset.pid));
+    closeSheet();
+    return from === 'list' ? quickAddSheet(p) : productEditor(p);
+  };
 }
 
 function quickAddSheet(p) {
@@ -1048,6 +1141,7 @@ function quickAddSheet(p) {
   openSheet(`${sheetHead(p.name)}
     <form class="stack" id="qaForm">
       <p class="muted small">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price)].filter(Boolean).join(' · ')}</p>
+      ${healthBadges(p, { long: true }) || proteinCost(p, pr.price) !== null ? `<p class="small">${healthBadges(p, { long: true })} ${proteinCost(p, pr.price) !== null ? `<span class="protein-cost">${proteinLabel(proteinCost(p, pr.price))}</span>` : ''}</p>` : ''}
       ${status}
       ${cheaper ? `<p class="small hint">${cheaper}</p>` : ''}
       ${p.pantry > 0 ? `<p class="small muted">${fmtAmount(p.pantry, p.unit)} already at home.</p>` : ''}
@@ -1126,25 +1220,64 @@ async function renderProducts() {
       <button class="btn" data-act="scan" aria-label="Scan">📷</button>
       <button class="btn primary" data-act="new">＋</button>
     </div>
+    <div class="chips" role="group" aria-label="Sort products">
+      ${[['name', 'A–Z'], ['protein', 'Cheapest protein'], ['health', 'Healthiest']].map(([k, l]) => `<button type="button" class="chip ${(store.get('prodSort', 'name') === k) ? 'active' : ''}" data-sort="${k}">${l}</button>`).join('')}
+    </div>
+    <div id="offBanner"></div>
     <section class="card flush"><ul class="list" id="prodList"></ul></section>`;
   const listEl = document.getElementById('prodList');
+  const offBanner = () => {
+    const n = S.offPending || 0;
+    document.getElementById('offBanner').innerHTML = n ? `<button type="button" class="banner block-btn" data-act="off-refresh"><b>Get health ratings for ${n} scanned product${n === 1 ? '' : 's'}</b><span class="small">Nutri-Score, processing level and additives from Open Food Facts.</span></button>` : '';
+  };
+  offBanner();
+  const sortKey = (p) => {
+    const mode = store.get('prodSort', 'name');
+    if (mode === 'protein') {
+      // protein foods first (at least 20% of energy from protein), so rice doesn't "win" on sheer quantity
+      const v = proteinCost(p, priceAt(p.prices, S.storeId).price);
+      if (v === null) return 1e9;
+      return proteinShare(p) >= 0.2 ? v : 1e6 + v;
+    }
+    if (mode === 'health') return (p.nutriscore ? p.nutriscore.charCodeAt(0) - 96 : 6) * 10 + (p.nova || 5);
+    return 0;
+  };
   const draw = () => {
     const term = document.getElementById('prodSearch').value.trim().toLowerCase();
     store.set('prodSearch', term);
-    const rows = S.products.filter((p) => !term || `${p.name} ${p.brand || ''} ${p.category || ''} ${p.barcode || ''}`.toLowerCase().includes(term));
+    const rows = S.products.filter((p) => !term || `${p.name} ${p.brand || ''} ${p.category || ''} ${p.barcode || ''}`.toLowerCase().includes(term))
+      .sort((a, b) => sortKey(a) - sortKey(b) || a.name.localeCompare(b.name));
     listEl.innerHTML = rows.length ? rows.map((p) => {
       const pr = priceAt(p.prices, S.storeId);
       const n = Object.keys(p.prices).length;
-      return `<li class="tap" data-id="${p.id}"><div class="grow"><div class="name">${esc(p.name)}</div>
-        <div class="sub">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price), p.pantry > 0 ? `<span class="good-text">${fmtAmount(p.pantry, p.unit)} at home</span>` : ''].filter(Boolean).join(' · ')}</div></div>
+      const pc = proteinCost(p, pr.price);
+      return `<li class="tap" data-id="${p.id}"><div class="grow"><div class="name">${esc(p.name)} ${healthBadges(p)}</div>
+        <div class="sub">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price), p.pantry > 0 ? `<span class="good-text">${fmtAmount(p.pantry, p.unit)} at home</span>` : ''].filter(Boolean).join(' · ')}</div>
+        ${pc !== null ? `<div class="sub protein-cost">${proteinLabel(pc)}</div>` : ''}</div>
         <div class="right"><div class="num strong">${money(pr.price)}</div><div class="small muted">${pr.price === null ? 'no price' : pr.here ? esc(storeName(pr.storeId)) : `at ${esc(storeName(pr.storeId))}`}${n > 1 ? ` · ${n} shops` : ''}</div></div>
         <button type="button" class="icon-btn add-btn" data-add="${p.id}" aria-label="Add ${esc(p.name)} to the list">＋</button></li>`;
     }).join('') : `<li class="empty">${S.products.length ? 'No matches.' : 'No products yet. Scan something or tap ＋.'}</li>`;
   };
   draw();
   view.oninput = (e) => { if (e.target.id === 'prodSearch') draw(); };
-  view.onclick = (e) => {
+  view.onclick = async (e) => {
+    const sortBtn = e.target.closest('[data-sort]');
+    if (sortBtn) { store.set('prodSort', sortBtn.dataset.sort); view.querySelectorAll('[data-sort]').forEach((b) => b.classList.toggle('active', b === sortBtn)); return draw(); }
     const act = e.target.closest('[data-act]');
+    if (act && act.dataset.act === 'off-refresh') {
+      act.disabled = true;
+      try {
+        let r = { left: 1 };
+        while (r.left > 0) {
+          r = await api('products.refresh_off');
+          act.querySelector('b').textContent = r.left ? `Checking… ${r.left} to go` : 'Done';
+          if (!r.checked) break;
+        }
+        await loadProducts(); offBanner(); draw();
+        toast('Health ratings updated');
+      } catch (er) { fail(er); act.disabled = false; }
+      return;
+    }
     if (act && act.dataset.act === 'scan') return scanFlow('products');
     if (act && act.dataset.act === 'new') return productEditor({ id: null, name: '', brand: '', barcode: '', pack_size: 1, unit: 'each', category: '', prices: {} });
     const add = e.target.closest('[data-add]');
@@ -1177,9 +1310,19 @@ function productEditor(p, { addToList = false } = {}) {
         ${S.stores.map((s) => `<label>${esc(s.name)} <input name="price_${s.id}" type="number" inputmode="decimal" step="0.01" min="0" value="${p.prices && p.prices[s.id] ? p.prices[s.id].price : ''}"></label>`).join('') || '<p class="muted small">Add shops on the Budget tab first.</p>'}
       </fieldset>
 
-      <fieldset><legend id="nutLegend"></legend>
+      <fieldset class="stack"><legend id="nutLegend"></legend>
+        <div class="row wrap gap">
+          <button type="button" class="btn small" data-act="photo">📷 Photo of the label</button>
+          <button type="button" class="btn small" data-act="off">Open Food Facts</button>
+          <button type="button" class="btn small" data-act="standard">Standard values</button>
+        </div>
+        <input type="file" id="labelFile" accept="image/*" capture="environment" hidden>
+        <div id="photoBox" class="photo-box"></div>
+        <p class="small muted" id="labelHint">Type it from the label's <b>per 100 g</b> column, in the label's order.${S.labelReader ? ' Or take a photo and the app reads it for you.' : ''}</p>
         <div class="grid2">${NUTRIENTS.map(([k, label, unit]) => `<label>${label} (${unit}) <input name="n_${k}" type="number" inputmode="decimal" step="0.01" min="0" value="${p[k] ?? ''}"></label>`).join('')}</div>
-        <button type="button" class="btn small" data-act="off">Fill from Open Food Facts</button>
+        <p class="small warn-text" id="kjWarn" hidden></p>
+        <label>Ingredients <textarea name="ingredients" rows="3" placeholder="As printed on the pack (optional)">${esc(p.ingredients || '')}</textarea></label>
+        <div id="healthBox" class="small"></div>
       </fieldset>
 
       <button class="btn primary block">${addToList ? 'Save & add to list' : 'Save'}</button>
@@ -1190,7 +1333,52 @@ function productEditor(p, { addToList = false } = {}) {
   const form = document.getElementById('pForm');
   const legend = () => { document.getElementById('nutLegend').textContent = form.unit.value === 'each' ? 'Nutrition per item' : `Nutrition per 100 ${form.unit.value === 'ml' || form.unit.value === 'l' ? 'ml' : 'g'}`; };
   legend();
-  sheetBody.onchange = (e) => { if (e.target.name === 'unit') legend(); };
+  // health info that isn't typed (from Open Food Facts); additives also come from the typed ingredients
+  const health = { nutriscore: p.nutriscore || null, nova: p.nova || null, additives: [...(p.additives || [])] };
+  let pendingPhoto = null;   // base64 JPEG waiting for the product to be saved
+  const drawHealth = () => {
+    const typed = (form.ingredients.value.match(/\bE\s?-?\s?\d{3,4}[a-z]?\b/gi) || []).map((x) => `e${x.replace(/\D*(\d{3,4}[a-z]?).*/i, '$1')}`.toLowerCase());
+    const adds = [...new Set([...health.additives, ...typed])].sort();
+    const badges = healthBadges({ ...health, additives: adds }, { long: true });
+    document.getElementById('healthBox').innerHTML = badges
+      ? `${badges}${adds.length ? `<div class="muted">Additives: ${adds.map((a) => a.toUpperCase()).join(', ')}</div>` : ''}${health.nutriscore || health.nova ? '<div class="muted">Nutri-Score and processing level from Open Food Facts.</div>' : ''}`
+      : '';
+  };
+  const drawCheck = () => {
+    const n = {}; for (const [k] of NUTRIENTS) n[k] = form[`n_${k}`].value;
+    const w = form.unit.value === 'each' ? '' : energyCheck(n);
+    const el = document.getElementById('kjWarn'); el.textContent = w; el.hidden = !w;
+  };
+  const drawPhotos = () => {
+    const box = document.getElementById('photoBox');
+    const saved = (p.photos || []).filter((x) => x.kind === 'label');
+    box.innerHTML = pendingPhoto ? `<img src="data:image/jpeg;base64,${pendingPhoto}" alt="Label photo (not saved yet)">`
+      : saved.map((x) => `<a href="photo.php?id=${x.id}" target="_blank" rel="noopener"><img src="photo.php?id=${x.id}" alt="Label photo"></a>`).join('');
+    box.hidden = !box.innerHTML;
+  };
+  drawHealth(); drawCheck(); drawPhotos();
+  sheetBody.onchange = async (e) => {
+    if (e.target.name === 'unit') { legend(); drawCheck(); }
+    if (e.target.id === 'labelFile' && e.target.files[0]) {
+      try {
+        pendingPhoto = await shrinkPhoto(e.target.files[0]);
+        drawPhotos();
+        if (!S.labelReader) { toast('Photo kept with the product. Type the numbers from it'); return; }
+        toast('Reading the label…');
+        const r = await api('label.read', { data: pendingPhoto, mime: 'image/jpeg' });
+        let filled = 0;
+        for (const [k] of NUTRIENTS) if (r.nutrition[k] !== null) { form[`n_${k}`].value = r.nutrition[k]; filled++; }
+        if (r.ingredients && !form.ingredients.value) form.ingredients.value = r.ingredients;
+        drawHealth(); drawCheck();
+        toast(r.column === 'serving' ? 'Careful: that looks like the per serving column. Check against the label'
+          : filled || r.ingredients ? 'Filled in from the photo. Check it against the label before saving' : "Couldn't read numbers. Try closer, straight on, no glare");
+      } catch (er) { fail(er); }
+    }
+  };
+  sheetBody.oninput = (e) => {
+    if (e.target.name && e.target.name.startsWith('n_')) drawCheck();
+    if (e.target.name === 'ingredients') drawHealth();
+  };
 
   if (p.id) {
     api('products.history', { id: p.id }).then(({ history }) => {
@@ -1204,7 +1392,7 @@ function productEditor(p, { addToList = false } = {}) {
     if (!act) return;
     try {
       if (act.dataset.act === 'scan-code') {
-        const snapshot = collect();
+        const snapshot = { ...collect(), ...Object.fromEntries(NUTRIENTS.map(([k]) => [k, form[`n_${k}`].value])) };
         closeSheet();
         openScanner((code) => productEditor({ ...p, ...snapshot, barcode: code }, { addToList }));
       } else if (act.dataset.act === 'off') {
@@ -1215,9 +1403,35 @@ function productEditor(p, { addToList = false } = {}) {
         if (!s) return toast('Not found on Open Food Facts');
         if (!form.name.value && s.name) form.name.value = s.name;
         if (!form.brand.value && s.brand) form.brand.value = s.brand;
-        if (!s.has_nutrition) return toast('Found, but no nutrition info listed');
+        if (!s.has_nutrition) {
+          Object.assign(health, { nutriscore: s.nutriscore || health.nutriscore, nova: s.nova || health.nova, additives: s.additives && s.additives.length ? s.additives : health.additives });
+          if (s.ingredients && !form.ingredients.value) form.ingredients.value = s.ingredients;
+          drawHealth();
+          return toast('Found, but no nutrition info listed');
+        }
+        Object.assign(health, { nutriscore: s.nutriscore || health.nutriscore, nova: s.nova || health.nova, additives: s.additives && s.additives.length ? s.additives : health.additives });
+        if (s.ingredients && !form.ingredients.value) form.ingredients.value = s.ingredients;
+        drawHealth();
         for (const [k] of NUTRIENTS) if (s.nutrition[k] !== null) form[`n_${k}`].value = s.nutrition[k];
+        drawCheck();
         toast('Nutrition filled in. Check it against the label');
+      } else if (act.dataset.act === 'photo') {
+        document.getElementById('labelFile').click();
+      } else if (act.dataset.act === 'standard') {
+        const unit = form.unit.value === 'each' ? 'each' : (['ml', 'l'].includes(form.unit.value) ? 'ml' : 'g');
+        const options = STANDARD_FOODS.filter(([, u]) => u === unit);
+        if (!options.length) return toast(unit === 'each' ? 'Standard values per item: only eggs. Switch the unit to see the rest' : 'No standard values for this unit');
+        const box = document.getElementById('photoBox');
+        box.hidden = false;
+        box.innerHTML = `<label>Closest match <select id="stdPick"><option value="">Pick a food…</option>${options.map(([name], i) => `<option value="${i}">${esc(name)}</option>`).join('')}</select></label>
+          <p class="small muted">Approximate values (USDA) for loose and butchery food. Raw or uncooked weight, so weigh before cooking.</p>`;
+        document.getElementById('stdPick').onchange = (ev) => {
+          const pick = options[Number(ev.target.value)];
+          if (!pick) return;
+          for (const [k] of NUTRIENTS) form[`n_${k}`].value = pick[2][k];
+          drawCheck(); drawPhotos();
+          toast(`Filled with standard values for ${pick[0].toLowerCase()}`);
+        };
       } else if (act.dataset.act === 'to-list') {
         await api('list.add', { product_id: p.id, qty: 1 }); toast('Added to list');
       } else if (act.dataset.act === 'delete') {
@@ -1235,6 +1449,7 @@ function productEditor(p, { addToList = false } = {}) {
     return {
       name: form.name.value, brand: form.brand.value, category: form.category.value, barcode: form.barcode.value,
       pack_size: form.pack_size.value, unit: form.unit.value, prices, nutrition,
+      ingredients: form.ingredients.value, nutriscore: health.nutriscore, nova: health.nova, additives: health.additives,
     };
   }
 
@@ -1243,6 +1458,7 @@ function productEditor(p, { addToList = false } = {}) {
     try {
       const data = collect();
       const { product } = await api('products.save', { id: p.id, ...data });
+      if (pendingPhoto) await api('products.photo', { product_id: product.id, kind: 'label', mime: 'image/jpeg', data: pendingPhoto });
       const home = form.pantry.value === '' ? 0 : Number(form.pantry.value);
       if (home !== (p.pantry || 0)) await api('pantry.set', { product_id: product.id, amount: home });
       if (addToList) await api('list.add', { product_id: product.id, qty: 1 });
@@ -1339,6 +1555,10 @@ function recipeView(r, portions = r.servings) {
           <div><div class="small muted">Batch uses</div><b class="num">${money(sc.used)}</b></div>
           <div><div class="small muted">Packs cost</div><b class="num">${money(sc.toBuy)}</b></div>
         </div>
+        ${(() => {
+          const prot = r.nutrition_per_serving ? r.nutrition_per_serving.protein_g : 0;
+          return prot > 0 && sc.perPortion > 0 ? `<p class="small"><b>${Math.round(prot)} g protein</b> per portion · <span class="protein-cost">${proteinLabel((sc.perPortion / prot) * 10)}</span>${r.missing_nutrition ? ' <span class="muted">(some ingredients have no nutrition)</span>' : ''}</p>` : '';
+        })()}
         ${sc.missing ? `<p class="small warn-text">${sc.missing} ingredient${sc.missing > 1 ? 's have' : ' has'} no price yet, so costs are low.</p>` : ''}
         ${n !== r.servings ? `<p class="small muted">Amounts scaled from the recipe's ${r.servings} portions.</p>` : ''}
       </section>
@@ -2162,7 +2382,7 @@ function passwordSheet() {
 (async function init() {
   try {
     const b = await api('bootstrap');
-    Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month });
+    Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader });
     const saved = store.get('store', null);
     S.storeId = S.stores.some((s) => String(s.id) === String(saved)) ? String(saved) : (S.stores[0] ? String(S.stores[0].id) : null);
     store.set('budgetMonth', null);
