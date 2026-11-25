@@ -364,3 +364,17 @@ body.auth { min-height: 100vh; display: grid; place-items: center; padding: 18px
 }
 .netbar.offline { background: var(--warn); color: #1d1406; border-color: var(--warn); }
 a.banner { display: grid; gap: 2px; text-decoration: none; }
+
+/* pull to refresh */
+.ptr {
+  position: fixed; z-index: 15; left: 50%; top: calc(env(safe-area-inset-top) + 8px);
+  width: 40px; height: 40px; border-radius: 999px; display: grid; place-items: center; pointer-events: none;
+  background: var(--surface); color: var(--muted); border: 1px solid var(--line-2); box-shadow: 0 6px 18px rgb(0 0 0 / .45);
+}
+.ptr.back { transition: transform .25s ease, opacity .25s ease; }
+.ptr.ready, .ptr.spin { color: var(--accent); }
+.ptr svg { transition: transform .05s linear; }
+.ptr.spin svg { animation: ptr-spin .8s linear infinite; }
+@keyframes ptr-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ptr.spin svg { animation-duration: 2.5s; } }
+html, body { overscroll-behavior-y: contain; }

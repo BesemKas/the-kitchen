@@ -351,16 +351,78 @@ pill.addEventListener('click', () => { location.hash = '#budget'; });
 
 /* ---------- routing ---------- */
 const routes = { list: ['List', renderList], products: ['Products', renderProducts], plan: ['Meal plan', renderPlan], recipes: ['Recipes', renderRecipes], budget: ['Budget', renderBudget] };
-async function route() {
+async function route(opts) {
+  const keep = !!(opts && opts.keep);   // refresh in place: no "Loading…" flash, keep the scroll position
   const key = (location.hash || '#list').slice(1).split('/')[0];
   const [title, fn] = routes[key] || routes.list;
   titleEl.textContent = title;
   document.body.className = `route-${routes[key] ? key : 'list'}`;
   document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === key));
   view.onclick = view.oninput = view.onchange = view.onsubmit = null;
-  view.innerHTML = '<p class="empty">Loading…</p>';
+  const y = window.scrollY;
+  if (!keep) view.innerHTML = '<p class="empty">Loading…</p>';
   try { await fn(); } catch (e) { view.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  if (keep) window.scrollTo(0, y);
 }
+
+/* ---------- pull to refresh (the installed app has no reload button) ---------- */
+(() => {
+  const ind = document.createElement('div');
+  ind.className = 'ptr';
+  ind.setAttribute('aria-hidden', 'true');
+  ind.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>';
+  document.body.appendChild(ind);
+  const icon = ind.firstChild;
+  const THRESHOLD = 70; const MAX = 110;
+  let startY = null; let startX = 0; let pull = 0; let busy = false;
+
+  const place = (px, spin = false) => {
+    ind.style.transform = `translate(-50%, ${px - 56}px)`;
+    ind.style.opacity = String(Math.min(1, Math.max(0, px / THRESHOLD)));
+    icon.style.transform = spin ? '' : `rotate(${px * 3}deg)`;
+    ind.classList.toggle('ready', px >= THRESHOLD);
+    ind.classList.toggle('spin', spin);
+  };
+  const reset = () => { startY = null; pull = 0; ind.classList.add('back'); place(0); setTimeout(() => ind.classList.remove('back'), 250); };
+
+  document.addEventListener('touchstart', (e) => {
+    const t = e.target;
+    if (busy || e.touches.length !== 1 || window.scrollY > 0 || !sheet.hidden
+      || (t.closest && t.closest('input, textarea, select, .chips, .daystrip, #scanner'))) { startY = null; return; }
+    startY = e.touches[0].clientY; startX = e.touches[0].clientX; pull = 0;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (startY === null) return;
+    const dy = e.touches[0].clientY - startY;
+    const dx = Math.abs(e.touches[0].clientX - startX);
+    if (dy <= 0 || window.scrollY > 0 || dx > dy) { if (pull) reset(); else startY = null; return; }
+    pull = Math.min(MAX, dy * 0.5);
+    place(pull);
+  }, { passive: true });
+
+  document.addEventListener('touchend', async () => {
+    if (startY === null) return;
+    startY = null;
+    if (pull < THRESHOLD) { reset(); return; }
+    busy = true;
+    place(THRESHOLD, true);
+    navigator.vibrate?.(10);
+    try {
+      if (queue.length) await sync();
+      const b = await api('bootstrap');
+      Object.assign(S, { users: b.users, stores: b.stores, budget: b.budget, spent: b.spent });
+      updatePill();
+      await loadProducts();
+      await route({ keep: true });
+      toast(b._offline ? "You're offline, showing saved data" : 'Up to date');
+    } catch (er) { fail(er); }
+    busy = false;
+    reset();
+  });
+  document.addEventListener('touchcancel', () => { if (startY !== null) reset(); });
+  place(0);
+})();
 window.addEventListener('hashchange', () => { if (!sheet.hidden) closeSheet(); route(); });
 
 async function loadProducts() {
