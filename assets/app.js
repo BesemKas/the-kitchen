@@ -1343,29 +1343,81 @@ function stopScanner() {
 function openScanner(onCode) {
   openSheet(`${sheetHead('Scan barcode')}
     <div class="scanner stack">
-      <video id="scanVideo" playsinline muted></video>
-      <p class="hint muted small" id="scanHint">Point the camera at the barcode.</p>
+      <div class="scan-frame"><video id="scanVideo" playsinline muted></video><div class="scan-guide" aria-hidden="true"></div>
+        <button type="button" class="scan-torch" id="scanTorch" hidden aria-pressed="false" aria-label="Torch">Torch</button></div>
+      <p class="hint muted small" id="scanHint">Hold the barcode inside the box, about a hand's width away.</p>
       <form class="row" id="manualCode"><input id="codeInput" class="grow" inputmode="numeric" placeholder="Or type the barcode"><button class="btn">Go</button></form>
     </div>`, stopScanner);
-  const finish = (code) => { stopScanner(); closeSheet(); onCode(code); };
+  let done = false;
+  const finish = (code) => {
+    if (done) return;
+    done = true;
+    if (navigator.vibrate) navigator.vibrate(60);
+    stopScanner(); closeSheet(); onCode(code);
+  };
   sheetBody.onsubmit = (e) => { e.preventDefault(); const c = document.getElementById('codeInput').value.replace(/\D/g, ''); if (c) finish(c); };
-
-  if (!window.ZXingBrowser || !navigator.mediaDevices) {
-    document.getElementById('scanHint').textContent = 'Camera scanning isn’t available here (it needs HTTPS). Type the barcode instead.';
+  const hint = (t) => { const h = document.getElementById('scanHint'); if (h) h.textContent = t; };
+  const video = document.getElementById('scanVideo');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    hint('Camera scanning isn’t available here (it needs HTTPS). Type the barcode instead.');
     return;
   }
-  const reader = new ZXingBrowser.BrowserMultiFormatOneDReader();
-  reader.decodeFromConstraints({ video: { facingMode: { ideal: 'environment' } } }, document.getElementById('scanVideo'), (result) => {
-    if (result) {
-      if (navigator.vibrate) navigator.vibrate(60);
-      finish(result.getText());
+  // a sharp picture with the focus following the barcode: most "finicky" scans are blur
+  const constraints = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, advanced: [{ focusMode: 'continuous' }] };
+  const slow = setTimeout(() => { if (!done) hint('Struggling? Add light (torch), move a little further away so it focuses, or type the number.'); }, 8000);
+  const afterStart = () => {
+    const track = video.srcObject && video.srcObject.getVideoTracks ? video.srcObject.getVideoTracks()[0] : null;
+    const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.focusMode && caps.focusMode.includes('continuous')) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+    if (caps.torch) {
+      const btn = document.getElementById('scanTorch');
+      if (!btn) return;
+      btn.hidden = false;
+      btn.onclick = async () => {
+        const on = btn.getAttribute('aria-pressed') !== 'true';
+        try { await track.applyConstraints({ advanced: [{ torch: on }] }); btn.setAttribute('aria-pressed', String(on)); btn.classList.toggle('on', on); } catch { btn.hidden = true; }
+      };
     }
-  }).then((c) => {
-    if (sheet.hidden) c.stop(); else scanControls = c;
-  }).catch((err) => {
-    const hint = document.getElementById('scanHint');
-    if (hint) hint.textContent = `Camera error: ${err.message || err.name}. Allow camera access, or type the barcode.`;
-  });
+  };
+  const failed = (err) => { clearTimeout(slow); hint(`Camera error: ${err.message || err.name}. Allow camera access, or type the barcode.`); };
+  const prevStop = () => clearTimeout(slow);
+
+  // 1. the phone's own barcode reader, where the browser has one (Android Chrome): fastest and most forgiving
+  const native = async () => {
+    const formats = await window.BarcodeDetector.getSupportedFormats();
+    const want = ['ean_13', 'ean_8', 'upc_a', 'upc_e'].filter((f) => formats.includes(f));
+    if (!want.length) return false;
+    const det = new window.BarcodeDetector({ formats: want });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+    if (sheet.hidden) { stream.getTracks().forEach((t) => t.stop()); return true; }
+    video.srcObject = stream;
+    await video.play();
+    let stopped = false;
+    scanControls = { stop: () => { stopped = true; prevStop(); stream.getTracks().forEach((t) => t.stop()); } };
+    afterStart();
+    const tick = async () => {
+      if (stopped || done) return;
+      try { const found = await det.detect(video); if (found.length && found[0].rawValue) return finish(found[0].rawValue); } catch { /* frame not ready */ }
+      setTimeout(tick, 90);
+    };
+    tick();
+    return true;
+  };
+  // 2. otherwise ZXing: supermarket barcode types only, trying harder, five times as often as its default
+  const zxing = () => {
+    if (!window.ZXingBrowser) { hint('The scanner didn’t load. Type the barcode instead.'); return; }
+    const F = ZXingBrowser.BarcodeFormat;
+    const hints = new Map([[2, [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E]], [3, true]]);   // POSSIBLE_FORMATS, TRY_HARDER
+    const reader = new ZXingBrowser.BrowserMultiFormatOneDReader(hints, { delayBetweenScanAttempts: 100, delayBetweenScanSuccess: 300 });
+    reader.decodeFromConstraints({ video: constraints }, video, (result) => { if (result) finish(result.getText()); })
+      .then((c) => {
+        if (sheet.hidden || done) { c.stop(); return; }
+        scanControls = { stop: () => { prevStop(); c.stop(); } };
+        afterStart();
+      }).catch(failed);
+  };
+  if ('BarcodeDetector' in window) native().then((ok) => { if (!ok) zxing(); }).catch(() => zxing());
+  else zxing();
 }
 
 async function scanFlow(from) {
