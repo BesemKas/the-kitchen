@@ -689,7 +689,7 @@ async function renderList() {
     const up = p.price !== null && it.product_id ? unitPrice(it, p.price) : '';
     if (up && !it.checked) sub.push(up);
     if (!it.checked) {
-      if (p.price === null) sub.push(`<span class="hint">Tap to add the ${esc(storeName(S.storeId))} price</span>`);
+      if (p.price === null) sub.push(`<button type="button" class="linklike hint" data-act="price">Add the ${esc(storeName(S.storeId))} price</button>`);
       else if (!p.here) sub.push(`<span class="hint">${esc(storeName(p.storeId))} price</span>`);
       else if (!p.manual) {
         const best = priceAt(it.prices, null);
@@ -702,7 +702,7 @@ async function renderList() {
     if (al.length) sub.unshift(`<button type="button" class="linklike ${levelClass(al[0])}-text" data-act="product">Alert: ${esc(al[0].word ? al[0].name : `${al[0].name} (${al[0].label})`)} ›</button>`);
     return `<li class="${p.price === null && !it.checked ? 'noprice' : ''} ${al.length ? `has-alert ${levelClass(al[0])}` : ''}" data-id="${it.id}">
       <input type="checkbox" data-act="check" ${it.checked ? 'checked' : ''} aria-label="${esc(it.name)}">
-      <div class="grow">
+      <div class="grow tap" data-act="${prod ? 'product' : 'price'}">
         <div class="name">${esc(it.name)}${prod && prod.nutriscore ? ` <span class="ns mini ns-${prod.nutriscore}">${prod.nutriscore.toUpperCase()}</span>` : ''}${it.from_plan && !it.checked ? '<span class="tag">plan</span>' : ''}</div>
         ${sub.length ? `<div class="sub">${sub.join(' · ')}</div>` : ''}
       </div>
@@ -780,18 +780,11 @@ async function renderList() {
           }
           await api('list.update', { id: it.id, qty: it.qty - 1 });
           break;
-        case 'price': {
-          const p = itemPrice(it);
-          const at = it.product_id ? ` at ${storeName(S.storeId)}` : '';
-          const v = await askNumber(`Price of ${it.name}${at}`, p.here ? p.price : '', { hint: it.product_id ? 'Price for one pack. Saved to the product so the app learns it.' : 'Price for one.' });
-          if (v === null) return;
-          await api('list.update', { id: it.id, price: v, store_id: S.storeId });
-          break;
-        }
+        case 'price': if (!(await askItemPrice(it))) return; break;
         case 'scan': return scanFlow('list');
         case 'usuals': return usualsSheet();
         case 'checkout': return checkoutSheet(checkedTotal);
-        case 'product': { const pr = S.products.find((x) => x.id === it.product_id); return pr && productView(pr, { from: 'list' }); }
+        case 'product': { const pr = S.products.find((x) => x.id === it.product_id); return pr && productView(pr, { from: 'list', item: it }); }
         case 'alerts-review': {
           const first = items.filter((i) => !i.checked && i.product_id).map((i) => S.products.find((x) => x.id === i.product_id)).find((x) => x && analyseProduct(x).alerts.length);
           return first && productView(first, { from: 'list' });
@@ -1344,7 +1337,7 @@ function stopScanner() {
 function openScanner(onCode) {
   openSheet(`${sheetHead('Scan barcode')}
     <div class="scanner stack">
-      <div class="scan-frame"><video id="scanVideo" playsinline muted></video><div class="scan-guide" aria-hidden="true"></div>
+      <div class="scan-frame"><video id="scanVideo" playsinline muted autoplay></video><div class="scan-guide" aria-hidden="true"></div>
         <button type="button" class="scan-torch" id="scanTorch" hidden aria-pressed="false" aria-label="Torch">Torch</button></div>
       <p class="hint muted small" id="scanHint">Hold the barcode inside the box, about a hand's width away.</p>
       <form class="row" id="manualCode"><input id="codeInput" class="grow" inputmode="numeric" placeholder="Or type the barcode"><button class="btn">Go</button></form>
@@ -1364,7 +1357,8 @@ function openScanner(onCode) {
     return;
   }
   // a sharp picture with the focus following the barcode: most "finicky" scans are blur
-  const constraints = { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, advanced: [{ focusMode: 'continuous' }] };
+  // ask plainly (iPhones can hang on fancier requests), then sharpen once the camera is running
+  const constraints = { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } };
   const slow = setTimeout(() => { if (!done) hint('Struggling? Add light (torch), move a little further away so it focuses, or type the number.'); }, 8000);
   const afterStart = () => {
     const track = video.srcObject && video.srcObject.getVideoTracks ? video.srcObject.getVideoTracks()[0] : null;
@@ -1380,8 +1374,14 @@ function openScanner(onCode) {
       };
     }
   };
-  const failed = (err) => { clearTimeout(slow); hint(`Camera error: ${err.message || err.name}. Allow camera access, or type the barcode.`); };
-  const prevStop = () => clearTimeout(slow);
+  const failed = (err) => { clearTimeout(slow); clearTimeout(watchdog); hint(`Camera error: ${err.message || err.name}. Allow camera access in Settings, or type the barcode.`); };
+  const prevStop = () => { clearTimeout(slow); clearTimeout(watchdog); };
+  // a black box with no message is the worst outcome: if no picture arrives, say so
+  const watchdog = setTimeout(() => {
+    if (done || sheet.hidden || video.videoWidth) return;
+    try { video.play(); } catch { /* not ready */ }
+    setTimeout(() => { if (!done && !sheet.hidden && !video.videoWidth) hint('The camera didn’t start. Close this and open the scanner again, check Settings → Safari → Camera, or type the barcode.'); }, 2500);
+  }, 5000);
 
   // 1. the phone's own barcode reader, where the browser has one (Android Chrome): fastest and most forgiving
   const native = async () => {
@@ -1470,6 +1470,16 @@ async function pickProductSheet(from, hint) {
     closeSheet();
     return from === 'list' ? quickAddSheet(p) : productEditor(p);
   };
+}
+
+/** Ask for a list item's price at the shop you're in; true when one was saved. */
+async function askItemPrice(it) {
+  const p = itemPrice(it);
+  const at = it.product_id ? ` at ${storeName(S.storeId)}` : '';
+  const v = await askNumber(`Price of ${it.name}${at}`, p.here && !p.shared ? p.price : '', { hint: it.product_id ? 'Price for one pack. Saved to the product so the app learns it.' : 'Price for one.' });
+  if (v === null) return false;
+  await api('list.update', { id: it.id, price: v, store_id: S.storeId });
+  return true;
 }
 
 function quickAddSheet(p) {
@@ -2064,7 +2074,7 @@ function swapCardHtml(p, c, { link = true } = {}) {
 }
 
 /** The product screen: alerts, Nutri-Score, nutrition, ingredients, best swap. */
-function productView(p, { from = 'products' } = {}) {
+function productView(p, { from = 'products', item = null } = {}) {
   const a = analyseProduct(p);
   const pr = priceAt(p.prices, S.storeId);
   const pc = proteinCost(p, pr.price);
@@ -2084,15 +2094,17 @@ function productView(p, { from = 'products' } = {}) {
         ${p.ingredients ? `<span class="small muted">${p.ingredients.split(',').length} ingredients · tap to read the whole list</span>` : ''}
       </button>` : (a.known ? '<p class="small muted">No ingredient list yet. Add it from the label to check additives.</p>' : '')}
     ${swap ? swapCardHtml(p, swap) : ''}
-    <div class="grid2"><button class="btn primary" data-act="add">Add to list</button><button class="btn" data-act="edit">Edit</button></div>`);
+    ${item ? `<div class="grid2"><button class="btn primary" data-act="item-price">${pr.here && !pr.shared ? 'Change the price' : `Add the ${esc(storeName(S.storeId))} price`}</button><button class="btn" data-act="edit">Edit product</button></div>`
+      : '<div class="grid2"><button class="btn primary" data-act="add">Add to list</button><button class="btn" data-act="edit">Edit</button></div>'}`);
   sheetBody.onclick = async (e) => {
     const t = e.target.closest('[data-act],[data-code]');
     if (!t) return;
     try {
-      if (t.dataset.code) return additiveSheet(t.dataset.code, p, () => productView(p, { from }));
+      if (t.dataset.code) return additiveSheet(t.dataset.code, p, () => productView(p, { from, item }));
       switch (t.dataset.act) {
-        case 'xray': return xraySheet(p, () => productView(p, { from }));
-        case 'swaps': return swapsSheet(p, () => productView(p, { from }));
+        case 'xray': return xraySheet(p, () => productView(p, { from, item }));
+        case 'swaps': return swapsSheet(p, () => productView(p, { from, item }));
+        case 'item-price': closeSheet(); if (await askItemPrice(item)) route(); return;
         case 'edit': closeSheet(); return productEditor(p);
         case 'add': await api('list.add', { product_id: p.id, qty: 1 }); closeSheet(); toast(`${p.name} added to the list`); return route();
         default:
