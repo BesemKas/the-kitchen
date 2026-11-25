@@ -395,6 +395,7 @@ function product_row(array $r, array $prices): array
     $r['best_price'] = best_price($prices[$r['id']] ?? []);
     $r['pantry'] = isset($r['pantry']) && $r['pantry'] !== null ? (float)$r['pantry'] : 0.0;
     $r['bought_count'] = (int)($r['bought_count'] ?? 0);
+    $r['skip_again'] = !empty($r['skip_again']);
     $r['nova'] = isset($r['nova']) && $r['nova'] !== null ? (int)$r['nova'] : null;
     $r['additives'] = !empty($r['additives']) ? explode(',', $r['additives']) : [];
     unset($r['created_at'], $r['off_checked_at']);
@@ -1307,7 +1308,7 @@ try {
             $prices = latest_prices();
             // your products: everything people added, plus loaded catalogue products you've actually used
             $people = implode(',', array_map('intval', household_people($uid) ?: [$uid]));
-            $rows = array_map(fn($r) => product_row($r, $prices), q("SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p
+            $rows = array_map(fn($r) => product_row($r, $prices), q("SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought, pa.updated_at pantry_at, pa.skip_again FROM products p
                 LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ?
                 WHERE p.source <> 'off' OR pa.product_id IS NOT NULL
                    OR p.id IN (SELECT pr.product_id FROM prices pr JOIN stores s ON s.id = pr.store_id AND s.user_id = ?)
@@ -1327,9 +1328,16 @@ try {
             out(['off_pending' => $offPending, 'products' => $rows, 'aisle_order' => json_decode(user_setting('aisle_order', DEFAULT_AISLES), true) ?: []]);
 
         case 'pantry.set':
+            // how much is at home; "skip" hides it from Buy again until it's bought again
             $pid = int_in($in, 'product_id');
-            $amount = num_in($in, 'amount', 0, 0, 1e7);
-            q('INSERT INTO pantry (user_id, product_id, amount) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE amount = VALUES(amount)', [$kid, $pid, $amount]);
+            q('SELECT 1 FROM products WHERE id = ?', [$pid])->fetchColumn() || fail('Product not found', 404);
+            if (array_key_exists('amount', $in)) {
+                $amount = num_in($in, 'amount', 0, 0, 1e7);
+                q('INSERT INTO pantry (user_id, product_id, amount, bought_count) VALUES (?, ?, ?, 1) ON DUPLICATE KEY UPDATE amount = VALUES(amount), skip_again = IF(VALUES(amount) > 0, 0, skip_again)', [$kid, $pid, $amount]);
+            }
+            if (array_key_exists('skip', $in)) {
+                q('INSERT INTO pantry (user_id, product_id, amount, skip_again) VALUES (?, ?, 0, ?) ON DUPLICATE KEY UPDATE skip_again = VALUES(skip_again)', [$kid, $pid, !empty($in['skip']) ? 1 : 0]);
+            }
             out(['ok' => true]);
 
         case 'aisles.set':
@@ -1342,7 +1350,7 @@ try {
             $term = trim(mb_strtolower(str_in($in, 'q', 60) ?? ''));
             mb_strlen($term) >= 2 || out(['products' => []]);
             $like = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $term) . '%';
-            $rows = q("SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ?
+            $rows = q("SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought, pa.updated_at pantry_at, pa.skip_again FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ?
                        WHERE LOWER(CONCAT_WS(' ', p.name, p.brand)) LIKE ?
                        ORDER BY COALESCE(pa.bought_count, 0) > 0 DESC, LOWER(p.name) LIKE ? DESC, p.name LIMIT 25", [$kid, $like, $term . '%'])->fetchAll();
             $prices = latest_prices(array_map(fn($r) => (int)$r['id'], $rows));
@@ -1358,7 +1366,7 @@ try {
                 log_scan($uid, 'barcode', 'instore');
                 out(['product' => null, 'suggestion' => null, 'barcode' => $code, 'instore' => true]);
             }
-            $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.barcode = ?', [$kid, $code])->fetch();
+            $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought, pa.updated_at pantry_at, pa.skip_again FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.barcode = ?', [$kid, $code])->fetch();
             if ($row) {
                 log_scan($uid, 'barcode', 'known');
                 out(['product' => product_row($row, latest_prices([(int)$row['id']])), 'suggestion' => null]);
@@ -1472,7 +1480,7 @@ try {
                 }
                 record_price($id, (int)$storeId, (float)$price, $uid);
             }
-            $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.id = ?', [$kid, $id])->fetch();
+            $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought, pa.updated_at pantry_at, pa.skip_again FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.id = ?', [$kid, $id])->fetch();
             out(['product' => product_row($row, latest_prices([$id]))]);
 
         case 'products.price':
@@ -1580,6 +1588,27 @@ try {
             q(!empty($in['all']) ? 'DELETE FROM list_items WHERE user_id = ?' : 'DELETE FROM list_items WHERE user_id = ? AND checked = 1', [$kid]);
             out(['ok' => true]);
 
+        case 'list.restore':
+            // undo of a remove or clear: the app sends back the rows it removed, and they return as they were
+            $back = 0;
+            $people = array_map('intval', household_people($uid) ?: [$uid]);
+            foreach (array_slice((array)($in['items'] ?? []), 0, 500) as $r) {
+                if (!is_array($r) || empty($r['name'])) {
+                    continue;
+                }
+                $pid = isset($r['product_id']) && $r['product_id'] !== null ? (int)$r['product_id'] : null;
+                if ($pid !== null && !q('SELECT 1 FROM products WHERE id = ?', [$pid])->fetchColumn()) {
+                    $pid = null;
+                }
+                $qty = max(0.01, min(1000, (float)($r['qty'] ?? 1)));
+                $price = isset($r['unit_price']) && $r['unit_price'] !== null ? max(0, min(1e6, (float)$r['unit_price'])) : null;
+                $created = isset($r['created_at']) && preg_match('/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/', (string)$r['created_at']) ? $r['created_at'] : date('Y-m-d H:i:s');
+                $addedBy = isset($r['added_by']) && in_array((int)$r['added_by'], $people, true) ? (int)$r['added_by'] : $uid;
+                $back += q('INSERT IGNORE INTO list_items (id, user_id, product_id, name, qty, unit_price, checked, from_plan, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    [(int)($r['id'] ?? 0) ?: null, $kid, $pid, mb_substr((string)$r['name'], 0, 120), $qty, $price, !empty($r['checked']) ? 1 : 0, !empty($r['from_plan']) ? 1 : 0, $addedBy, $created])->rowCount();
+            }
+            out(['restored' => $back]);
+
         case 'list.checkout':
             $storeId = own_store(int_in($in, 'store_id', false));
             $date = date_in($in, 'date', date('Y-m-d'));
@@ -1603,7 +1632,7 @@ try {
                     $pack = q('SELECT pack_size FROM products WHERE id = ?', [$i['product_id']])->fetchColumn();
                     if ($pack !== false) {
                         pantry_add((int)$i['product_id'], (float)$i['qty'] * (float)$pack);
-                        q('UPDATE pantry SET bought_count = bought_count + 1, last_bought = ? WHERE user_id = ? AND product_id = ?', [$date, $kid, $i['product_id']]);
+                        q('UPDATE pantry SET bought_count = bought_count + 1, last_bought = ?, skip_again = 0 WHERE user_id = ? AND product_id = ?', [$date, $kid, $i['product_id']]);
                     }
                 }
             }
