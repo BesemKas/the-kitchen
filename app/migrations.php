@@ -78,8 +78,11 @@ const MIGRATIONS = [
     7 => [
         // Everyone gets their own app: own list, shops, prices, plan, fridge, pantry, budget and history.
         // Only recipes (and the product facts recipes are built from) stay shared.
-        // Everything that exists now goes to Besem's account (falls back to the first account).
-        "SET @owner = COALESCE((SELECT id FROM users WHERE username IN ('besem', 'besemkas') ORDER BY id LIMIT 1), (SELECT MIN(id) FROM users))",
+        // Everything that exists now goes to Jano's account; failing that, to the first account that isn't Qara's.
+        "SET @owner = COALESCE(
+            (SELECT id FROM users WHERE LOWER(username) IN ('jano', 'besem', 'besemkas') ORDER BY id LIMIT 1),
+            (SELECT MIN(id) FROM users WHERE LOWER(username) <> 'qara'),
+            (SELECT MIN(id) FROM users))",
 
         "CREATE TABLE user_settings (
             user_id INT UNSIGNED NOT NULL,
