@@ -729,6 +729,7 @@ async function renderList() {
   input.oninput = () => {
     const q = input.value.trim().toLowerCase();
     if (!q) { sug.hidden = true; return; }
+    searchFurther(q, () => { if (input.value.trim().toLowerCase() === q) input.oninput(); });
     const matches = S.products.filter((p) => `${p.name} ${p.brand || ''}`.toLowerCase().includes(q)).slice(0, 6);
     sug.innerHTML = matches.map((p) => {
       const pr = priceAt(p.prices, S.storeId);
@@ -1614,7 +1615,7 @@ async function renderProducts() {
     }).join('') : `<li class="empty">${S.products.length ? 'No matches.' : 'No products yet. Scan something or tap ＋.'}</li>`;
   };
   draw();
-  view.oninput = (e) => { if (e.target.id === 'prodSearch') draw(); };
+  view.oninput = (e) => { if (e.target.id === 'prodSearch') { draw(); searchFurther(e.target.value, draw); } };
   view.onclick = async (e) => {
     const chip = e.target.closest('[data-pantry]');
     if (chip) {
@@ -2788,6 +2789,27 @@ function recipeEditor(r) {
 }
 
 /* ================= MEAL PLAN ================= */
+/* ----- the shared catalogue: your products are on the phone, the rest are a search away ----- */
+const searchedTerms = new Set();
+/** Ask the server for catalogue products matching a search; resolves true when new ones arrived. */
+async function fetchCatalogue(q) {
+  const term = q.trim().toLowerCase();
+  if (term.length < 2 || searchedTerms.has(term)) return false;
+  searchedTerms.add(term);
+  try {
+    const { products } = await api('products.search', { q: term });
+    let added = false;
+    for (const p of products) if (!S.products.some((x) => x.id === p.id)) { S.products.push(p); added = true; }
+    return added;
+  } catch { searchedTerms.delete(term); return false; }
+}
+let catalogueTimer = null;
+/** Debounced: after typing stops, look further and redraw if anything new turned up. */
+function searchFurther(q, redraw) {
+  clearTimeout(catalogueTimer);
+  catalogueTimer = setTimeout(async () => { if (await fetchCatalogue(q)) redraw(); }, 300);
+}
+
 /* ----- at home: plenty, low or out, instead of grams nobody keeps up to date ----- */
 /** Roughly what's at home: half a pack or more is plenty. null for things you've never had. */
 function pantryState(p) {
@@ -3240,8 +3262,9 @@ async function renderBudget(mode = 'money') {
       <div class="row"><button class="btn small grow" data-act="export">Download my data</button><a class="btn small grow" href="./?privacy">How your data is kept</a></div>
       <button class="btn small danger block" data-act="delete-account">Delete my account</button>
     </section>
-    ${S.isAdmin ? '<section class="card stack"><h2>Running the app</h2><div class="row"><button class="btn grow" data-act="admin">People</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div></section>' : ''}
+    ${S.isAdmin ? '<section class="card stack"><h2>Running the app</h2><div class="row"><button class="btn grow" data-act="admin">People</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div><button class="btn block" data-act="off-import">Load South African products</button><p class="small muted" id="importStatus">From Open Food Facts into the shared catalogue, 100 at a time. Keep this screen open; it takes a while.</p></section>' : ''}
     <p class="small muted" id="dispCheck"></p>
+    <p class="small muted">Product names and nutrition partly come from <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a>, shared under the <a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">Open Database Licence</a>.</p>
 ` : `
     <div class="row">
       <button class="btn small" data-day="${dayShift(per.start, -1)}" aria-label="Previous pay month">‹</button>
@@ -3338,6 +3361,23 @@ async function renderBudget(mode = 'money') {
       if (t.dataset.act === 'household') return householdSheet();
       if (t.dataset.act === 'feedback') return feedbackSheet();
       if (t.dataset.act === 'pilot') return pilotSheet();
+      if (t.dataset.act === 'off-import') {
+        // one page every 7 seconds: Open Food Facts allows 10 searches a minute
+        const st = document.getElementById('importStatus');
+        t.disabled = true;
+        let added = 0;
+        for (;;) {
+          if (location.hash !== '#me') { toast('Loading paused. Tap the button again to carry on.'); break; }
+          let r;
+          try { r = await api('admin.off_import'); } catch (er) { st.textContent = `Stopped: ${er.message}`; break; }
+          added += r.added;
+          st.textContent = `Page ${r.page} of ${r.pages}: ${added} new products so far, ${r.catalogue} in the catalogue.`;
+          if (r.done) { st.textContent += ' Done.'; toast('South African products loaded'); break; }
+          await new Promise((res) => setTimeout(res, 7000));
+        }
+        t.disabled = false;
+        return;
+      }
       if (t.dataset.act === 'off-share') {
         const r = await api('off.consent', { share: S.offShare !== '1' });
         S.offShare = r.off_share;
