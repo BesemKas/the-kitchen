@@ -1513,12 +1513,14 @@ function productEditor(p, { addToList = false } = {}) {
     };
   }
 
+  let shareLater = null;
   sheetBody.onsubmit = async (e) => {
     e.preventDefault();
     try {
       const data = collect();
       const { product } = await api('products.save', { id: p.id, ...data });
       if (pendingPhoto) await api('products.photo', { product_id: product.id, kind: 'label', mime: 'image/jpeg', data: pendingPhoto });
+      shareLater = product && product.id > 0 && product.barcode ? product.id : null;
       const home = form.pantry.value === '' ? 0 : Number(form.pantry.value);
       if (home !== (p.pantry || 0)) await api('pantry.set', { product_id: product.id, amount: home });
       if (addToList) await api('list.add', { product_id: product.id, qty: 1 });
@@ -1526,6 +1528,40 @@ function productEditor(p, { addToList = false } = {}) {
       toast(addToList ? 'Saved and added to list' : 'Saved');
       await loadProducts();
       route();
+      if (shareLater) offAfterSave(shareLater);
+    } catch (er) { fail(er); }
+  };
+}
+
+/* ---------- giving back to Open Food Facts ---------- */
+/** After a product with a barcode is saved: share it if the person said yes, or ask them once. */
+function offAfterSave(pid) {
+  if (!S.offReady || !navigator.onLine) return;
+  if (S.offShare === '1') { api('off.queue', { product_id: pid }).then((r) => r.queued && offSync()).catch(() => {}); return; }
+  if (S.offShare === '') offConsentSheet(pid);
+}
+function offSync() { setTimeout(() => api('off.sync').catch(() => {}), 500); }
+function offConsentSheet(pid) {
+  let answered = false;
+  openSheet(`${sheetHead('Help other South Africans scan')}
+    <p>Lots of South African products aren't in Open Food Facts yet, the free food database this app looks barcodes up in. Can the app add the products you save?</p>
+    <ul class="stack tight small">
+      <li>Only what's missing there is added: the product's name, brand, pack size, ingredients, nutrition per 100 g and label photos.</li>
+      <li>It becomes public, under open licences, for anyone to use, including other apps.</li>
+      <li>Your name, prices, lists and plans are never sent.</li>
+    </ul>
+    <button type="button" class="btn primary block" data-share="1">Yes, share products I add</button>
+    <button type="button" class="btn block" data-share="0">No thanks</button>
+    <p class="small muted">You can change this any time under Budget → Settings.</p>`, () => { if (!answered) S.offShare = ''; });
+  sheetBody.onclick = async (e) => {
+    const b = e.target.closest('[data-share]');
+    if (!b) return;
+    answered = true;
+    try {
+      const r = await api('off.consent', { share: b.dataset.share === '1', product_id: pid });
+      S.offShare = r.off_share;
+      closeSheet();
+      if (r.queued) { toast('Thanks, it goes to Open Food Facts in the background'); offSync(); }
     } catch (er) { fail(er); }
   };
 }
@@ -2776,6 +2812,8 @@ async function renderBudget() {
       </div>
       <p class="small muted">Logged in as ${esc(S.user.display_name)}.</p>
       <div class="row"><button class="btn small grow" data-act="password">Change password</button><button class="btn small grow" data-act="logout">Log out</button></div>
+      ${S.offReady ? `<div class="toggle-row static"><span class="grow"><b>Share products I add with Open Food Facts</b><span class="small muted block">Only product facts and label photos, so the next person's scan works. Never your name, prices or lists.</span></span>
+        <button type="button" class="switch ${S.offShare === '1' ? 'on' : ''}" data-act="off-share" aria-pressed="${S.offShare === '1'}" aria-label="Share products with Open Food Facts"><i></i></button></div>` : ''}
       <div class="stack tight"><span class="small muted">Household</span>
         <button class="btn block" data-act="household">${S.household ? `${esc(S.household.name)} · ${S.household.mode === 'shared' ? 'shared kitchen' : 'separate kitchens'} · ${S.household.members.length} ${S.household.members.length === 1 ? 'person' : 'people'}` : 'Start a household or invite someone'}</button>
       </div>
@@ -2848,6 +2886,12 @@ async function renderBudget() {
         return;
       }
       if (t.dataset.act === 'household') return householdSheet();
+      if (t.dataset.act === 'off-share') {
+        const r = await api('off.consent', { share: S.offShare !== '1' });
+        S.offShare = r.off_share;
+        t.classList.toggle('on', S.offShare === '1'); t.setAttribute('aria-pressed', String(S.offShare === '1'));
+        return toast(S.offShare === '1' ? 'New products you add will be shared' : 'Sharing off');
+      }
       if (t.dataset.act === 'export') {
         const { export: data } = await api('account.export');
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -2943,6 +2987,7 @@ function welcomeSheet() {
 
 /** Admin: who's using the app, reset links, switch accounts off, open or close sign-ups. */
 async function adminSheet() {
+  let offStats = null;
   const draw = (users, open) => {
     const ago = (d) => {
       if (!d) return 'never';
@@ -2960,7 +3005,8 @@ async function adminSheet() {
             <button type="button" class="btn small" data-act="toggle">${Number(u.disabled) ? 'Switch on' : 'Switch off'}</button>
             <button type="button" class="btn small ghost" data-act="mkadmin">${Number(u.is_admin) ? 'Remove admin' : 'Make admin'}</button></div>`}
         </div></li>`).join('')}</ul>
-      <p class="small muted">A reset link works once, for 24 hours. Send it to them yourself, e.g. on WhatsApp.</p>`);
+      <p class="small muted">A reset link works once, for 24 hours. Send it to them yourself, e.g. on WhatsApp.</p>
+      ${offStats ? `<p class="small muted">Open Food Facts: ${Number(offStats.sent || 0)} products added, ${Number(offStats.pending || 0)} waiting, ${Number(offStats.exists || 0)} already there${offStats.failed ? `, <span class="warn-text">${Number(offStats.failed)} failed</span>` : ''}.</p>` : ''}`);
     sheetBody.onclick = async (e) => {
       const t = e.target.closest('[data-act]');
       if (!t) return;
@@ -2981,11 +3027,13 @@ async function adminSheet() {
         }
         if (t.dataset.act === 'mkadmin') await api('admin.admin', { user_id: u.id, admin: !Number(u.is_admin) });
         const r = await api('admin.users');
+        offStats = r.off;
         draw(r.users.map((x) => ({ ...x, id: Number(x.id) })), r.signups_open);
       } catch (er) { fail(er); }
     };
   };
   const r = await api('admin.users');
+  offStats = r.off;
   draw(r.users.map((x) => ({ ...x, id: Number(x.id) })), r.signups_open);
 }
 
@@ -3113,11 +3161,12 @@ async function joinSheet(token, isNew) {
   try {
     const b = await api('bootstrap');
     Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader,
-      alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday, isAdmin: !!b.is_admin, signupsOpen: !!b.signups_open, household: b.household || null });
+      alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday, isAdmin: !!b.is_admin, signupsOpen: !!b.signups_open, household: b.household || null, offReady: !!b.off_ready, offShare: b.off_share || '' });
     const saved = store.get('store', null);
     S.storeId = S.stores.some((s) => String(s.id) === String(saved)) ? String(saved) : (S.stores[0] ? String(S.stores[0].id) : null);
     store.set('budgetDate', null);
     updatePill();
+    if (S.offReady && S.offShare === '1' && navigator.onLine) setTimeout(() => api('off.sync').catch(() => {}), 4000);   // anything left waiting
     const flash = store.get('flash', null);
     if (flash) { store.set('flash', null); setTimeout(() => toast(flash), 300); }
     if (location.hash === '#welcome') { history.replaceState(null, '', '#list'); route(); welcomeSheet(); return; }
