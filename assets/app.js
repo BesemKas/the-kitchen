@@ -1337,9 +1337,10 @@ function stopScanner() {
 function openScanner(onCode) {
   openSheet(`${sheetHead('Scan barcode')}
     <div class="scanner stack">
-      <div class="scan-frame"><video id="scanVideo" playsinline muted autoplay></video><div class="scan-guide" aria-hidden="true"></div>
-        <button type="button" class="scan-torch" id="scanTorch" hidden aria-pressed="false" aria-label="Torch">Torch</button></div>
-      <p class="hint muted small" id="scanHint">Hold the barcode inside the box, about a hand's width away.</p>
+      <div class="scan-wrap"><video id="scanVideo" playsinline muted autoplay></video><div class="scan-line" aria-hidden="true"></div></div>
+      <button type="button" class="btn small" id="scanTorch" hidden aria-pressed="false">Torch</button>
+      <p class="hint muted small" id="scanHint">Starting the camera…</p>
+      <p class="tiny muted" id="scanState"></p>
       <form class="row" id="manualCode"><input id="codeInput" class="grow" inputmode="numeric" placeholder="Or type the barcode"><button class="btn">Go</button></form>
     </div>`, stopScanner);
   let done = false;
@@ -1360,8 +1361,13 @@ function openScanner(onCode) {
   // exactly what worked before: just the back camera. iPhones black out if the stream is reconfigured.
   const constraints = { facingMode: { ideal: 'environment' } };
   const slow = setTimeout(() => { if (!done) hint('Struggling? Add light (torch), move a little further away so it focuses, or type the number.'); }, 8000);
-  const afterStart = () => {
+  const state = (t) => { const el = document.getElementById('scanState'); if (el) el.textContent = t; };
+  const afterStart = (how) => {
+    hint('Hold the barcode flat in the middle, about a hand’s width away.');
+    const report = () => { if (!done && !sheet.hidden) state(`${how} · ${video.videoWidth}×${video.videoHeight} · ${video.paused ? 'paused' : 'live'}`); };
+    report(); setTimeout(report, 1500); setTimeout(report, 4000);
     const track = video.srcObject && video.srcObject.getVideoTracks ? video.srcObject.getVideoTracks()[0] : null;
+    if (track) track.addEventListener('ended', () => { if (!done) state(`${how} · camera stopped`); });
     const caps = track && track.getCapabilities ? track.getCapabilities() : {};
     if (caps.torch) {
       const btn = document.getElementById('scanTorch');
@@ -1394,7 +1400,7 @@ function openScanner(onCode) {
     await video.play();
     let stopped = false;
     scanControls = { stop: () => { stopped = true; prevStop(); stream.getTracks().forEach((t) => t.stop()); } };
-    afterStart();
+    afterStart('built-in reader');
     const tick = async () => {
       if (stopped || done) return;
       try { const found = await det.detect(video); if (found.length && found[0].rawValue) return finish(found[0].rawValue); } catch { /* frame not ready */ }
@@ -1407,13 +1413,13 @@ function openScanner(onCode) {
   const zxing = () => {
     if (!window.ZXingBrowser) { hint('The scanner didn’t load. Type the barcode instead.'); return; }
     const F = ZXingBrowser.BarcodeFormat;
-    const hints = new Map([[2, [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E]], [3, true]]);   // POSSIBLE_FORMATS, TRY_HARDER
-    const reader = new ZXingBrowser.BrowserMultiFormatOneDReader(hints, { delayBetweenScanAttempts: 150, delayBetweenScanSuccess: 300 });
+    const hints = new Map([[2, [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E]]]);   // POSSIBLE_FORMATS only
+    const reader = new ZXingBrowser.BrowserMultiFormatOneDReader(hints, { delayBetweenScanAttempts: 250, delayBetweenScanSuccess: 300 });
     reader.decodeFromConstraints({ video: constraints }, video, (result) => { if (result) finish(result.getText()); })
       .then((c) => {
         if (sheet.hidden || done) { c.stop(); return; }
         scanControls = { stop: () => { prevStop(); c.stop(); } };
-        afterStart();
+        afterStart('zxing');
       }).catch(failed);
   };
   if ('BarcodeDetector' in window) native().then((ok) => { if (!ok) zxing(); }).catch(() => zxing());

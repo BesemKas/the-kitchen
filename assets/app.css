@@ -574,3 +574,9 @@ button.pick { display: flex; width: 100%; text-align: left; padding: 12px 14px; 
 .card > h2.pad { padding: 14px 16px 0; margin: 0; }
 p.center { text-align: center; }
 #kitchenBody .list li .home-chip { margin-top: 0; flex: none; }
+
+/* scanner, plain again: rounded video with no clipping wrapper or shadow overlay (iPhone Safari can render those black) */
+.scan-wrap { position: relative; }
+.scan-line { position: absolute; left: 10%; right: 10%; top: 50%; height: 2px; background: var(--accent); opacity: .8; pointer-events: none; }
+.tiny { font-size: 11px; margin: 0; }
+#scanTorch[hidden] { display: none; }
