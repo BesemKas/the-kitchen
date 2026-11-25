@@ -435,6 +435,8 @@ function recipes_with_costs(?int $onlyId = null): array
                 'unit' => $it['unit'],
                 'pack_size' => (float)$it['pack_size'],
                 'amount' => $amount,
+                'qty' => $it['qty'] === null ? null : (float)$it['qty'],
+                'qty_unit' => $it['qty_unit'],
                 'note' => $it['note'],
                 'cost' => $line,
             ];
@@ -926,6 +928,32 @@ function off_contribute(int $productId, ?int $userId): string
     return 'sent';
 }
 
+/* ----- ingredient units ----- */
+/** Unit => [family, size in the family's base: g, ml or items]. "pack" is a whole product pack. */
+const ING_UNITS = ['g' => ['mass', 1], 'kg' => ['mass', 1000], 'ml' => ['vol', 1], 'l' => ['vol', 1000],
+    'tsp' => ['vol', 5], 'tbsp' => ['vol', 15], 'cup' => ['vol', 250], 'each' => ['count', 1]];
+
+/**
+ * An amount typed in any sensible unit, as an amount in the product's own unit (what costing and the pantry use).
+ * Weight and volume convert into each other at 1 g = 1 ml: close enough for milk, oil and sauces.
+ */
+function ing_to_product_unit(float $qty, string $unit, string $productUnit, float $packSize): ?float
+{
+    if ($unit === 'pack') {
+        return $qty * max(0.001, $packSize);
+    }
+    $from = ING_UNITS[$unit] ?? null;
+    $to = ING_UNITS[$productUnit] ?? null;
+    if (!$from || !$to) {
+        return null;
+    }
+    $cross = ['mass' => 1, 'vol' => 1];
+    if ($from[0] !== $to[0] && !(isset($cross[$from[0]]) && isset($cross[$to[0]]))) {
+        return null;   // grams of something that's counted in items can't be converted
+    }
+    return $qty * $from[1] / $to[1];
+}
+
 /** One line in the pilot numbers; never allowed to break the request. */
 function log_scan(int $uid, string $kind, string $result): void
 {
@@ -1144,6 +1172,17 @@ try {
             $order = array_values(array_unique(array_filter(array_map(fn($x) => mb_substr(trim((string)$x), 0, 40), (array)($in['order'] ?? [])))));
             set_user_setting('aisle_order', json_encode($order, JSON_UNESCAPED_UNICODE));
             out(['aisle_order' => $order]);
+
+        case 'products.search':
+            // name search for big catalogues: things you've bought first, then names that start with the words, then the rest
+            $term = trim(mb_strtolower(str_in($in, 'q', 60) ?? ''));
+            mb_strlen($term) >= 2 || out(['products' => []]);
+            $like = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $term) . '%';
+            $rows = q("SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ?
+                       WHERE LOWER(CONCAT_WS(' ', p.name, p.brand)) LIKE ?
+                       ORDER BY COALESCE(pa.bought_count, 0) > 0 DESC, LOWER(p.name) LIKE ? DESC, p.name LIMIT 25", [$kid, $like, $term . '%'])->fetchAll();
+            $prices = latest_prices(array_map(fn($r) => (int)$r['id'], $rows));
+            out(['products' => array_map(fn($r) => product_row($r, $prices), $rows)]);
 
         case 'products.lookup':
             $code = preg_replace('/\D/', '', (string)($in['barcode'] ?? ''));
@@ -1433,11 +1472,21 @@ try {
             foreach (array_values((array)($in['items'] ?? [])) as $i => $it) {
                 $it = (array)$it;
                 $pid = int_in($it, 'product_id');
-                $amount = num_in($it, 'amount', null, 0.001, 100000);
-                if ($amount === null) {
+                $qty = num_in($it, 'qty', null, 0.001, 100000);
+                $qtyUnit = isset($it['qty_unit']) && (isset(ING_UNITS[$it['qty_unit']]) || $it['qty_unit'] === 'pack') ? (string)$it['qty_unit'] : null;
+                if ($qty !== null && $qtyUnit !== null) {
+                    $prod = q('SELECT name, unit, pack_size FROM products WHERE id = ?', [$pid])->fetch() ?: fail('Unknown product');
+                    $amount = ing_to_product_unit($qty, $qtyUnit, $prod['unit'], (float)$prod['pack_size']);
+                    $amount === null && fail("{$prod['name']} is counted in items, so use items or packs for it");
+                } else {
+                    // older phones (or offline changes) send the amount in the product's unit
+                    $amount = num_in($it, 'amount', null, 0.001, 100000);
+                    $qty = $qtyUnit = null;
+                }
+                if ($amount === null || $amount <= 0) {
                     continue;
                 }
-                q('INSERT INTO recipe_items (recipe_id, product_id, amount, note, sort) VALUES (?, ?, ?, ?, ?)', [$id, $pid, $amount, str_in($it, 'note', 120), $i]);
+                q('INSERT INTO recipe_items (recipe_id, product_id, amount, note, sort, qty, qty_unit) VALUES (?, ?, ?, ?, ?, ?, ?)', [$id, $pid, round($amount, 3), str_in($it, 'note', 120), $i, $qty, $qtyUnit]);
             }
             foreach (array_values((array)($in['steps'] ?? [])) as $i => $st) {
                 $st = (array)$st;
@@ -1482,7 +1531,7 @@ try {
             q('INSERT INTO recipes (name, servings, instructions, prep_minutes, cook_minutes, user_id, is_public) VALUES (?, ?, ?, ?, ?, ?, 0)',
                 [mb_substr($r['name'], 0, 120), $r['servings'], $r['instructions'], $r['prep_minutes'], $r['cook_minutes'], $uid]);
             $new = (int)db()->lastInsertId();
-            q('INSERT INTO recipe_items (recipe_id, product_id, amount, note, sort) SELECT ?, product_id, amount, note, sort FROM recipe_items WHERE recipe_id = ?', [$new, $rid]);
+            q('INSERT INTO recipe_items (recipe_id, product_id, amount, note, sort, qty, qty_unit) SELECT ?, product_id, amount, note, sort, qty, qty_unit FROM recipe_items WHERE recipe_id = ?', [$new, $rid]);
             q('INSERT INTO recipe_steps (recipe_id, sort, body, timer_minutes) SELECT ?, sort, body, timer_minutes FROM recipe_steps WHERE recipe_id = ?', [$new, $rid]);
             db()->commit();
             out(['recipe' => recipes_with_costs($new)[0]]);
