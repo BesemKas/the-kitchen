@@ -8,6 +8,31 @@ const sheetBody = document.getElementById('sheetBody');
 const titleEl = document.getElementById('title');
 const pill = document.getElementById('budgetPill');
 
+/* South African phones type a decimal comma, and a type="number" field silently drops "12,50".
+   So every number field becomes a text field with a decimal keypad, and a comma turns into a point as you type. */
+function fixNumberInputs(root) {
+  if (!root || !root.querySelectorAll) return;
+  const els = root.matches && root.matches('input[type=number]') ? [root] : root.querySelectorAll('input[type=number]');
+  els.forEach((el) => {
+    const whole = el.getAttribute('step') === '1';
+    el.type = 'text';
+    el.inputMode = whole ? 'numeric' : 'decimal';
+    el.autocomplete = 'off';
+    el.dataset.num = whole ? 'int' : 'dec';
+  });
+}
+fixNumberInputs(document);
+new MutationObserver((ms) => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1) fixNumberInputs(n); })
+  .observe(document.body, { childList: true, subtree: true });
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (!(el instanceof HTMLInputElement) || !(el.dataset.num || el.inputMode === 'decimal') || !/[,\s]/.test(el.value)) return;
+  const pos = el.selectionStart;
+  const before = el.value.length;
+  el.value = el.value.replace(/\s/g, '').replace(/,/g, '.');
+  try { el.setSelectionRange(pos - (before - el.value.length), pos - (before - el.value.length)); } catch { /* not focusable */ }
+}, true);
+
 const S = { user: null, users: [], stores: [], budget: 0, spent: 0, month: '', products: [], storeId: null, aisles: [], pendingDel: new Set(), pendingClear: null };
 const UNITS = ['each', 'g', 'kg', 'ml', 'l'];
 const SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];

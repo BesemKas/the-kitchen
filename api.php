@@ -44,10 +44,20 @@ function str_in(array $in, string $key, int $max, bool $required = false): ?stri
     return mb_substr($v, 0, $max);
 }
 
+/** "12,50", "R 1 234,50" or "12.50" → "12.50": South African keypads type a decimal comma. */
+function decimal_str($v): string
+{
+    $v = preg_replace('/[\sR\x{00A0}]/u', '', (string)$v);
+    return str_contains($v, ',') && !str_contains($v, '.') ? str_replace(',', '.', $v) : str_replace(',', '', $v);
+}
+
 function num_in(array $in, string $key, ?float $default = null, float $min = 0, float $max = 1e9): ?float
 {
     if (!isset($in[$key]) || $in[$key] === '' || $in[$key] === null) {
         return $default;
+    }
+    if (is_string($in[$key])) {
+        $in[$key] = decimal_str($in[$key]);
     }
     if (!is_numeric($in[$key])) {
         fail("$key must be a number");
@@ -1229,6 +1239,7 @@ try {
                 if ($price === '' || $price === null) {
                     continue;
                 }
+                $price = is_string($price) ? decimal_str($price) : $price;
                 if (!ctype_digit((string)$storeId) || !is_numeric($price) || $price < 0 || $price > 1e6) {
                     fail('Bad price');
                 }
