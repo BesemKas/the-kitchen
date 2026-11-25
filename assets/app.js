@@ -2816,9 +2816,7 @@ async function renderBudget() {
       <h2>Settings</h2>
       <form class="row" id="budgetForm"><label class="grow">Monthly grocery budget (R) <input name="monthly_budget" type="number" inputmode="decimal" step="0.01" min="0" value="${b.budget}"></label><button class="btn">Save</button></form>
       <form class="row" id="paydayForm"><label class="grow">Payday (day of the month) <input name="payday" type="number" inputmode="numeric" min="1" max="31" step="1" value="${b.payday || 1}"></label><button class="btn">Save</button></form>
-      <div class="stack tight"><span class="small muted">Paid early (December!) or on a different day? Start the new pay month today.</span>
-        <button type="button" class="btn" data-act="paid-today">I got paid today</button>
-        ${(b.pay_marks || []).length ? `<span class="small muted">Marked paydays: ${b.pay_marks.map((d) => `${esc(fmtDay(d))} <button type="button" class="linklike" data-unmark="${d}" aria-label="Remove ${esc(d)}">✕</button>`).join(', ')}</span>` : ''}</div>
+      <p class="small muted">When payday falls on a weekend or public holiday, the pay month starts on the working day before, the way salaries are paid.</p>
       <form class="stack" id="targets"><span class="small muted">My daily targets</span>
         <div class="grid2">
           <label>Protein (g) <input name="protein" type="number" inputmode="numeric" min="0" value="${(S.users.find((u) => u.id === S.user.id) || {}).protein_target_g ?? ''}"></label>
@@ -2875,7 +2873,7 @@ async function renderBudget() {
     } catch (er) { fail(er); }
   };
   view.onclick = async (e) => {
-    const t = e.target.closest('[data-day],[data-act],[data-del-trip],[data-del-store],[data-rename],[data-aisle-up],[data-aisle-del],[data-unmark]');
+    const t = e.target.closest('[data-day],[data-act],[data-del-trip],[data-del-store],[data-rename],[data-aisle-up],[data-aisle-del]');
     if (!t) return;
     try {
       if (t.dataset.aisleUp || t.dataset.aisleDel) {
@@ -2886,11 +2884,6 @@ async function renderBudget() {
         return renderBudget();
       }
       if (t.dataset.day !== undefined) { store.set('budgetDate', t.dataset.day || null); return renderBudget(); }
-      if (t.dataset.act === 'paid-today') {
-        const r = await api('pay.mark', {});
-        S.period = r.period; store.set('budgetDate', null); toast(`New pay month started: ${r.period.label}`); return renderBudget();
-      }
-      if (t.dataset.unmark) { const r = await api('pay.unmark', { date: t.dataset.unmark }); S.period = r.period; return renderBudget(); }
       if (t.dataset.delTrip) { if (!confirm('Delete this logged shop?')) return; await api('trips.delete', { id: t.dataset.delTrip }); return renderBudget(); }
       if (t.dataset.delStore) {
         if (!confirm(`Delete ${storeName(t.dataset.delStore)}? All its saved prices go too.`)) return;
