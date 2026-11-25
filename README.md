@@ -222,3 +222,11 @@ Today opens on the diary: energy (kJ) and protein against your targets, then car
 - **Quick:** a name and the numbers, for anything else.
 
 Ticking a planned meal logs it too: the planned portions, or one portion in a shared kitchen. Removing an entry undoes what logging did: fridge portions go back, the pantry amount goes back, the takeaway spend goes, and a planned meal is unticked.
+
+## At home: Plenty, Low or Out
+
+Exact grams at home drift from the first snack, so the app shows a rough state instead: **Plenty** (half a pack or more), **Low** or **Out**. It's shown only for things you've had.
+
+- Finishing a shop adds what you bought. Cooking a recipe and logging a product in the diary take from it.
+- Tap the label in Kitchen to correct it: Plenty → Low → Out.
+- Kitchen has a **Low or out** filter. The Shop tab lists **Running low at home** under the list, with one-tap ＋ Add.

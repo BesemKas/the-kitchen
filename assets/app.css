@@ -541,3 +541,9 @@ button.switch { border: 0; cursor: pointer; }
 .meter.warn .fill { background: var(--warn); }
 .diary .aisle { padding: 12px 16px 0; }
 button.pick { display: flex; width: 100%; text-align: left; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 14px; background: var(--surface); color: var(--text); cursor: pointer; min-height: 48px; font: inherit; }
+
+/* at home: plenty / low / out */
+.home-chip { margin-top: 6px; border-radius: 999px; padding: 4px 10px; font: 600 12px Inter, system-ui, sans-serif; cursor: pointer; border: 1px solid var(--line-2); background: transparent; }
+.home-chip.home-plenty { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.home-chip.home-low { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.home-chip.home-out { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
