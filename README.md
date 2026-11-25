@@ -113,3 +113,13 @@ The app works with no signal, for example inside a shop:
 - Shopping-list changes made offline (add, tick, quantities, prices, finish shop) are saved on the phone and sent when the connection comes back. A bar at the top shows how many are waiting.
 - Each offline change has an id, and the server remembers ids for 14 days (`op_log` table), so a change sent twice is only applied once.
 - Logging out clears the copy on the phone.
+
+## Accounts
+
+Each login is its own app: shopping list, shops, prices, meal plan, fridge, pantry, budget, takeaways and shopping history all belong to one person.
+Shared between everyone:
+
+- **recipes**
+- **product facts** that recipes are built from: name, brand, barcode, pack size, nutrition and aisle
+
+A shared recipe is costed with the prices of the person looking at it.

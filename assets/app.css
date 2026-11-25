@@ -363,3 +363,4 @@ body.auth { min-height: 100vh; display: grid; place-items: center; padding: 18px
   background: var(--surface); color: var(--text); border: 1px solid var(--line-2); box-shadow: 0 6px 18px rgb(0 0 0 / .4);
 }
 .netbar.offline { background: var(--warn); color: #1d1406; border-color: var(--warn); }
+a.banner { display: grid; gap: 2px; text-decoration: none; }
