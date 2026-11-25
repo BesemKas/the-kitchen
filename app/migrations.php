@@ -275,6 +275,34 @@ const MIGRATIONS = [
     14 => [
         "ALTER TABLE recipe_items ADD COLUMN qty DECIMAL(10,3) NULL, ADD COLUMN qty_unit VARCHAR(8) NULL",
     ],
+    // the food diary: what each person ate, with its nutrition worked out when it was logged
+    15 => [
+        "CREATE TABLE IF NOT EXISTS food_log (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id INT UNSIGNED NOT NULL,
+            day DATE NOT NULL,
+            slot VARCHAR(10) NOT NULL,
+            kind VARCHAR(10) NOT NULL,
+            ref_id INT UNSIGNED NULL,
+            product_id INT UNSIGNED NULL,
+            recipe_id INT UNSIGNED NULL,
+            name VARCHAR(120) NOT NULL,
+            qty DECIMAL(10,3) NULL,
+            qty_unit VARCHAR(8) NULL,
+            amount DECIMAL(10,3) NULL,
+            energy_kj DECIMAL(8,1) NULL,
+            protein_g DECIMAL(7,1) NULL,
+            carbs_g DECIMAL(7,1) NULL,
+            fat_g DECIMAL(7,1) NULL,
+            sugar_g DECIMAL(7,1) NULL,
+            cost DECIMAL(10,2) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX user_day (user_id, day),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+    ],
 ];
 
 function schema_version(): int

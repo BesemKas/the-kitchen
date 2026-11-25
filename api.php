@@ -928,6 +928,84 @@ function off_contribute(int $productId, ?int $userId): string
     return 'sent';
 }
 
+/* ----- the food diary ----- */
+const DIARY_NUTRIENTS = ['energy_kj', 'protein_g', 'carbs_g', 'fat_g', 'sugar_g'];
+
+/** Breakfast before 10:30, lunch before 15:00, dinner before 21:00, otherwise a snack. */
+function default_slot(): string
+{
+    $hm = (int)date('Gi');
+    return $hm < 1030 ? 'breakfast' : ($hm < 1500 ? 'lunch' : ($hm < 2100 ? 'dinner' : 'snack'));
+}
+
+/** Nutrition for an amount of a product (in the product's own unit), or nulls if the label isn't known. */
+function product_nutrition(array $p, float $amount): array
+{
+    $out = array_fill_keys(DIARY_NUTRIENTS, null);
+    if ($p['energy_kj'] === null && $p['protein_g'] === null) {
+        return $out;
+    }
+    $f = nutrition_factor($p['unit'], $amount);
+    foreach (DIARY_NUTRIENTS as $n) {
+        $out[$n] = $p[$n] === null ? null : round((float)$p[$n] * $f, 1);
+    }
+    return $out;
+}
+
+/** Nutrition for some portions of a recipe. */
+function recipe_nutrition(int $recipeId, float $portions): array
+{
+    $out = array_fill_keys(DIARY_NUTRIENTS, null);
+    $r = recipes_with_costs($recipeId)[0] ?? null;
+    if (!$r) {
+        return $out;
+    }
+    foreach (DIARY_NUTRIENTS as $n) {
+        $v = $r['nutrition_per_serving'][$n] ?? null;
+        $out[$n] = $v === null ? null : round((float)$v * $portions, 1);
+    }
+    return $out;
+}
+
+function diary_insert(array $row): int
+{
+    $cols = array_keys($row);
+    q('INSERT INTO food_log (' . implode(', ', $cols) . ') VALUES (' . implode(', ', array_fill(0, count($cols), '?')) . ')', array_values($row));
+    return (int)db()->lastInsertId();
+}
+
+/** Take portions from the oldest fridge batches of a recipe (freezer last). Returns how many were there. */
+function take_from_fridge(int $recipeId, float $want): float
+{
+    $taken = 0.0;
+    foreach (q("SELECT id, portions FROM fridge WHERE user_id = ? AND recipe_id = ? AND portions > 0 ORDER BY location = 'freezer', cooked_on, id FOR UPDATE", [kid(), $recipeId])->fetchAll() as $b) {
+        if ($taken >= $want) {
+            break;
+        }
+        $take = min((float)$b['portions'], $want - $taken);
+        q('UPDATE fridge SET portions = portions - ? WHERE id = ?', [$take, $b['id']]);
+        $taken += $take;
+    }
+    q('DELETE FROM fridge WHERE user_id = ? AND portions <= 0', [kid()]);
+    return $taken;
+}
+
+/** Put portions back: on the newest batch of that recipe, or a new batch if it's all gone. */
+function return_to_fridge(int $recipeId, float $n): void
+{
+    if ($n <= 0) {
+        return;
+    }
+    $latest = q('SELECT id FROM fridge WHERE user_id = ? AND recipe_id = ? ORDER BY cooked_on DESC, id DESC LIMIT 1', [kid(), $recipeId])->fetchColumn();
+    if ($latest) {
+        q('UPDATE fridge SET portions = portions + ? WHERE id = ?', [$n, $latest]);
+        return;
+    }
+    $rec = recipes_with_costs($recipeId)[0] ?? null;
+    q('INSERT INTO fridge (recipe_id, name, portions, cost_per_portion, cooked_on, user_id) VALUES (?, ?, ?, ?, CURDATE(), ?)',
+        [$recipeId, $rec['name'] ?? 'Meal', $n, $rec && !$rec['missing_prices'] ? $rec['cost_per_serving'] : null, kid()]);
+}
+
 /* ----- ingredient units ----- */
 /** Unit => [family, size in the family's base: g, ml or items]. "pack" is a whole product pack. */
 const ING_UNITS = ['g' => ['mass', 1], 'kg' => ['mass', 1000], 'ml' => ['vol', 1], 'l' => ['vol', 1000],
@@ -1643,33 +1721,21 @@ try {
                     db()->commit();
                     out(['taken' => 0.0]);
                 }
-                $want = (float)$p['servings'];
-                $taken = 0.0;
-                foreach (q("SELECT id, portions FROM fridge WHERE user_id = ? AND recipe_id = ? AND portions > 0 ORDER BY location = 'freezer', cooked_on, id FOR UPDATE", [$kid, $p['recipe_id']])->fetchAll() as $b) {
-                    if ($taken >= $want) {
-                        break;
-                    }
-                    $take = min((float)$b['portions'], $want - $taken);
-                    q('UPDATE fridge SET portions = portions - ? WHERE id = ?', [$take, $b['id']]);
-                    $taken += $take;
-                }
-                q('DELETE FROM fridge WHERE user_id = ? AND portions <= 0', [$kid]);
+                $taken = take_from_fridge((int)$p['recipe_id'], (float)$p['servings']);
                 q('UPDATE plan SET eaten_at = NOW(), fridge_taken = ? WHERE id = ?', [$taken, $id]);
+                // in your diary: the planned portions, or one portion when a shared kitchen plans for several people
+                $mine = $kid !== $uid ? 1.0 : (float)$p['servings'];
+                $rec = recipes_with_costs((int)$p['recipe_id'])[0] ?? null;
+                diary_insert(['user_id' => $uid, 'day' => $p['plan_date'] <= date('Y-m-d') ? $p['plan_date'] : date('Y-m-d'), 'slot' => $p['slot'], 'kind' => 'plan',
+                    'ref_id' => $id, 'recipe_id' => $p['recipe_id'], 'name' => mb_substr($rec['name'] ?? 'Meal', 0, 120), 'qty' => $mine, 'qty_unit' => 'portion',
+                    'cost' => $rec && !$rec['missing_prices'] ? round($rec['cost_per_serving'] * $mine, 2) : null] + recipe_nutrition((int)$p['recipe_id'], $mine));
                 db()->commit();
                 out(['taken' => $taken]);
             }
             $back = (float)$p['fridge_taken'];
-            if ($back > 0) {
-                $latest = q('SELECT id FROM fridge WHERE user_id = ? AND recipe_id = ? ORDER BY cooked_on DESC, id DESC LIMIT 1', [$kid, $p['recipe_id']])->fetchColumn();
-                if ($latest) {
-                    q('UPDATE fridge SET portions = portions + ? WHERE id = ?', [$back, $latest]);
-                } else {
-                    $rec = recipes_with_costs((int)$p['recipe_id'])[0] ?? null;
-                    q('INSERT INTO fridge (recipe_id, name, portions, cost_per_portion, cooked_on, user_id) VALUES (?, ?, ?, ?, CURDATE(), ?)',
-                        [$p['recipe_id'], $rec['name'] ?? 'Meal', $back, $rec && !$rec['missing_prices'] ? $rec['cost_per_serving'] : null, $kid]);
-                }
-            }
+            return_to_fridge((int)$p['recipe_id'], $back);
             q('UPDATE plan SET eaten_at = NULL, fridge_taken = 0 WHERE id = ?', [$id]);
+            q("DELETE FROM food_log WHERE kind = 'plan' AND ref_id = ?", [$id]);
             db()->commit();
             out(['returned' => $back]);
 
@@ -1884,6 +1950,7 @@ try {
                 'ingredient_alerts' => $mine('SELECT code, mode FROM ingredient_alerts WHERE user_id = ?'),
                 'my_recipes' => array_values(array_filter(recipes_with_costs(), fn($r) => $r['mine'])),
                 'household' => household_view($uid),
+                'food_diary' => $mine('SELECT day, slot, name, qty, qty_unit, energy_kj, protein_g, carbs_g, fat_g, sugar_g, cost FROM food_log WHERE user_id = ? ORDER BY day, id'),
                 'feedback_you_sent' => $mine('SELECT kind, used, annoyed, missing, note, created_at FROM feedback WHERE user_id = ?'),
                 'products_you_shared_with_open_food_facts' => $mine('SELECT p.barcode, p.name, c.status, c.updated_at FROM off_contributions c JOIN products p ON p.id = c.product_id WHERE c.user_id = ?'),
                 'shops_you_logged_for_your_household' => $mine('SELECT trip_date, kind, total, estimate, note FROM trips WHERE added_by = ? AND user_id <> added_by'),
@@ -1949,6 +2016,106 @@ try {
                 db()->query("SELECT RELEASE_LOCK('kitchen_off')");
             }
             out(['done' => $done]);
+
+        // ----- food diary -----
+        case 'diary.get':
+            $day = date_in($in, 'date', date('Y-m-d'));
+            $rows = q('SELECT id, slot, kind, name, qty, qty_unit, energy_kj, protein_g, carbs_g, fat_g, sugar_g, cost, product_id, recipe_id
+                       FROM food_log WHERE user_id = ? AND day = ? ORDER BY FIELD(slot, "breakfast", "lunch", "dinner", "snack"), id', [$uid, $day])->fetchAll();
+            $totals = array_fill_keys(DIARY_NUTRIENTS, 0.0);
+            $unknown = 0;
+            foreach ($rows as &$r) {
+                foreach (['qty', 'cost', ...DIARY_NUTRIENTS] as $k) {
+                    $r[$k] = $r[$k] === null ? null : (float)$r[$k];
+                }
+                foreach (['id', 'product_id', 'recipe_id'] as $k) {
+                    $r[$k] = $r[$k] === null ? null : (int)$r[$k];
+                }
+                if ($r['energy_kj'] === null && $r['protein_g'] === null) {
+                    $unknown++;
+                }
+                foreach (DIARY_NUTRIENTS as $n) {
+                    $totals[$n] += (float)($r[$n] ?? 0);
+                }
+            }
+            unset($r);
+            $me = q('SELECT protein_target_g, kj_target FROM users WHERE id = ?', [$uid])->fetch();
+            // the things you log most, for one-tap logging
+            $recent = q("SELECT kind, product_id, recipe_id, name, qty, qty_unit FROM food_log WHERE user_id = ? AND kind IN ('product', 'recipe', 'plan', 'fridge') AND day >= CURDATE() - INTERVAL 30 DAY
+                         GROUP BY kind, product_id, recipe_id, name, qty, qty_unit ORDER BY COUNT(*) DESC, MAX(id) DESC LIMIT 8", [$uid])->fetchAll();
+            out(['date' => $day, 'entries' => $rows, 'totals' => array_map(fn($v) => round($v, 1), $totals), 'unknown' => $unknown,
+                 'targets' => ['protein_g' => $me['protein_target_g'] === null ? null : (int)$me['protein_target_g'], 'energy_kj' => $me['kj_target'] === null ? null : (int)$me['kj_target']],
+                 'recent' => $recent, 'slot' => default_slot()]);
+
+        case 'diary.add':
+            $kind = (string)($in['kind'] ?? '');
+            $day = date_in($in, 'date', date('Y-m-d'));
+            $day > date('Y-m-d') && fail("You can't log tomorrow's food yet");
+            $slot = in_array($in['slot'] ?? '', SLOTS, true) ? $in['slot'] : default_slot();
+            $row = ['user_id' => $uid, 'day' => $day, 'slot' => $slot, 'kind' => $kind];
+            db()->beginTransaction();
+            switch ($kind) {
+                case 'product':
+                    // a product you ate on its own: its nutrition, and it comes off what's at home
+                    $p = q('SELECT * FROM products WHERE id = ?', [int_in($in, 'product_id')])->fetch() ?: fail('Product not found', 404);
+                    $qty = num_in($in, 'qty', null, 0.001, 100000) ?? fail('How much did you have?');
+                    $unit = (string)($in['qty_unit'] ?? $p['unit']);
+                    $amount = ing_to_product_unit($qty, $unit, $p['unit'], (float)$p['pack_size']) ?? fail("{$p['name']} is counted in items, so log items or packs");
+                    pantry_add((int)$p['id'], -$amount);
+                    $best = best_price(latest_prices([(int)$p['id']])[(int)$p['id']] ?? []);
+                    $row += ['product_id' => (int)$p['id'], 'name' => mb_substr($p['name'], 0, 120), 'qty' => $qty, 'qty_unit' => $unit, 'amount' => round($amount, 3),
+                             'cost' => $best === null ? null : round($amount / max(0.001, (float)$p['pack_size']) * $best, 2)] + product_nutrition($p, $amount);
+                    break;
+                case 'recipe':
+                    // portions of a recipe; from the fridge when there are any, otherwise cooked fresh
+                    $rid = int_in($in, 'recipe_id');
+                    can_see_recipe($rid) || fail('Recipe not found', 404);
+                    $n = num_in($in, 'portions', 1, 0.25, 20);
+                    $taken = !empty($in['from_fridge']) ? take_from_fridge($rid, $n) : 0.0;
+                    $rec = recipes_with_costs($rid)[0];
+                    $row['kind'] = $taken > 0 ? 'fridge' : 'recipe';
+                    $row += ['recipe_id' => $rid, 'name' => mb_substr($rec['name'], 0, 120), 'qty' => $n, 'qty_unit' => 'portion', 'amount' => $taken,
+                             'cost' => $rec['missing_prices'] ? null : round($rec['cost_per_serving'] * $n, 2)] + recipe_nutrition($rid, $n);
+                    break;
+                case 'takeaway':
+                    // a takeaway or meal out: it counts against the takeaway allowance, and towards the day if you know the numbers
+                    $cost = num_in($in, 'cost', null, 0, 1e5) ?? fail('How much was it?');
+                    $name = str_in($in, 'name', 120) ?: 'Takeaway';
+                    q("INSERT INTO trips (trip_date, store_id, total, note, user_id, kind, added_by) VALUES (?, NULL, ?, ?, ?, 'eating_out', ?)", [$day, $cost, $name, $uid, $uid]);
+                    $row += ['ref_id' => (int)db()->lastInsertId(), 'name' => $name, 'cost' => $cost,
+                             'energy_kj' => num_in($in, 'energy_kj', null, 0, 50000), 'protein_g' => num_in($in, 'protein_g', null, 0, 500)];
+                    break;
+                case 'quick':
+                    $row += ['name' => str_in($in, 'name', 120, true), 'energy_kj' => num_in($in, 'energy_kj', null, 0, 50000), 'protein_g' => num_in($in, 'protein_g', null, 0, 500),
+                             'carbs_g' => num_in($in, 'carbs_g', null, 0, 1000), 'fat_g' => num_in($in, 'fat_g', null, 0, 1000)];
+                    break;
+                default:
+                    fail('Unknown kind of entry');
+            }
+            $id = diary_insert($row);
+            db()->commit();
+            out(['id' => $id, 'kind' => $row['kind'], 'taken' => (float)($row['amount'] ?? 0)]);
+
+        case 'diary.delete':
+            // undo what logging did: fridge portions back, pantry back, takeaway spend gone, planned meal not eaten
+            $e = q('SELECT * FROM food_log WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $uid])->fetch() ?: fail('Entry not found', 404);
+            db()->beginTransaction();
+            if ($e['kind'] === 'plan' && $e['ref_id']) {
+                $pl = q('SELECT * FROM plan WHERE id = ? AND user_id = ?', [$e['ref_id'], $kid])->fetch();
+                if ($pl && $pl['eaten_at'] !== null) {
+                    return_to_fridge((int)$pl['recipe_id'], (float)$pl['fridge_taken']);
+                    q('UPDATE plan SET eaten_at = NULL, fridge_taken = 0 WHERE id = ?', [$pl['id']]);
+                }
+            } elseif ($e['kind'] === 'fridge' && $e['recipe_id']) {
+                return_to_fridge((int)$e['recipe_id'], (float)$e['amount']);
+            } elseif ($e['kind'] === 'product' && $e['product_id'] && $e['amount'] !== null) {
+                pantry_add((int)$e['product_id'], (float)$e['amount']);
+            } elseif ($e['kind'] === 'takeaway' && $e['ref_id']) {
+                q("DELETE FROM trips WHERE id = ? AND user_id = ? AND kind = 'eating_out'", [$e['ref_id'], $uid]);
+            }
+            q('DELETE FROM food_log WHERE id = ?', [$e['id']]);
+            db()->commit();
+            out(['ok' => true]);
 
         // ----- feedback -----
         case 'feedback.send':

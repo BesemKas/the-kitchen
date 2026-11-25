@@ -208,3 +208,17 @@ The app follows the day:
 - **Me** (the round initial at the top): name, daily targets, budget, payday, takeaway allowance, household, shops, aisle order, sharing, feedback, account and data, and admin tools.
 
 Old links (`#list`, `#products`, `#budget`) redirect to Shop, Kitchen and Money.
+
+## Food diary
+
+Today opens on the diary: energy (kJ) and protein against your targets, then carbs, fat and sugar, and everything you ate, by meal. Use ‹ › to look at earlier days.
+
+**I ate…** has five ways in, with a meal chosen by the time of day:
+
+- **Recent:** one tap for things you log often.
+- **Fridge:** "Ate 1" takes a portion off and logs it.
+- **Food:** search any product or recipe. Products take any sensible unit (30 g of a cheese bought per kg). Eating a product takes it off what's at home; a recipe takes portions from the fridge if there are any.
+- **Takeaway:** what it was and what it cost (and the kJ or protein if you know them). It also counts against the takeaway allowance.
+- **Quick:** a name and the numbers, for anything else.
+
+Ticking a planned meal logs it too: the planned portions, or one portion in a shared kitchen. Removing an entry undoes what logging did: fridge portions go back, the pantry amount goes back, the takeaway spend goes, and a planned meal is unticked.
