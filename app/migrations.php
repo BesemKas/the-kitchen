@@ -52,6 +52,20 @@ const MIGRATIONS = [
         // per-person daily targets, set by each person for themselves
         "ALTER TABLE users ADD COLUMN protein_target_g INT UNSIGNED NULL, ADD COLUMN kj_target INT UNSIGNED NULL",
     ],
+    5 => [
+        // what's at home, in each product's own unit (g, kg, ml, l or items)
+        "CREATE TABLE pantry (
+            product_id INT UNSIGNED PRIMARY KEY,
+            amount DECIMAL(12,3) NOT NULL DEFAULT 0,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        // the app's estimate at checkout, to compare with the till slip
+        "ALTER TABLE trips ADD COLUMN estimate DECIMAL(10,2) NULL",
+        // how often and when a product was last bought, for the "bought before" picker
+        "ALTER TABLE products ADD COLUMN bought_count INT UNSIGNED NOT NULL DEFAULT 0, ADD COLUMN last_bought DATE NULL",
+        "INSERT IGNORE INTO settings (k, v) VALUES ('aisle_order', '[\"Fresh produce\",\"Meat & fish\",\"Dairy & eggs\",\"Bakery\",\"Pantry\",\"Frozen\",\"Household\"]')",
+    ],
 ];
 
 function schema_version(): int
