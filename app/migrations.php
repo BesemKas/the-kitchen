@@ -160,6 +160,33 @@ const MIGRATIONS = [
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
     ],
+    10 => [
+        // more people: admin, disabled accounts, last seen; recipes owned and private unless shared
+        "SET @owner = COALESCE(
+            (SELECT id FROM users WHERE LOWER(username) IN ('jano', 'besem', 'besemkas') ORDER BY id LIMIT 1),
+            (SELECT MIN(id) FROM users WHERE LOWER(username) <> 'qara'),
+            (SELECT MIN(id) FROM users))",
+        "ALTER TABLE users ADD COLUMN is_admin TINYINT(1) NOT NULL DEFAULT 0, ADD COLUMN disabled TINYINT(1) NOT NULL DEFAULT 0, ADD COLUMN last_seen DATETIME NULL",
+        "UPDATE users SET is_admin = 1 WHERE id = @owner",
+        // existing recipes were shared between Jano and Qara: keep them visible to both by sharing them
+        "ALTER TABLE recipes ADD COLUMN user_id INT UNSIGNED NULL AFTER id, ADD COLUMN is_public TINYINT(1) NOT NULL DEFAULT 0, ADD INDEX (user_id), ADD INDEX (is_public)",
+        "UPDATE recipes SET user_id = @owner, is_public = 1",
+        "ALTER TABLE recipes ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL",
+        "ALTER TABLE products ADD COLUMN created_by INT UNSIGNED NULL, ADD FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL",
+        "CREATE TABLE rate_limits (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            bucket VARCHAR(80) NOT NULL,
+            at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX (bucket, at)
+        ) ENGINE=InnoDB",
+        "CREATE TABLE password_resets (
+            token_hash CHAR(64) PRIMARY KEY,
+            user_id INT UNSIGNED NOT NULL,
+            expires_at DATETIME NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB",
+        "INSERT IGNORE INTO settings (k, v) VALUES ('signups_open', '1')",
+    ],
 ];
 
 function schema_version(): int

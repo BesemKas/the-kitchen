@@ -86,9 +86,21 @@ function current_user(): ?array
     if (empty($_SESSION['user_id'])) {
         return null;
     }
-    $st = db()->prepare('SELECT id, username, display_name FROM users WHERE id = ?');
-    $st->execute([$_SESSION['user_id']]);
-    return $st->fetch() ?: null;
+    try {
+        $st = db()->prepare('SELECT id, username, display_name, is_admin, disabled FROM users WHERE id = ?');
+        $st->execute([$_SESSION['user_id']]);
+    } catch (PDOException $e) {
+        // before the accounts update has run
+        $st = db()->prepare('SELECT id, username, display_name, 0 is_admin, 0 disabled FROM users WHERE id = ?');
+        $st->execute([$_SESSION['user_id']]);
+    }
+    $u = $st->fetch();
+    if (!$u || (int)$u['disabled'] === 1) {
+        return null;
+    }
+    $u['is_admin'] = (int)$u['is_admin'] === 1;
+    unset($u['disabled']);
+    return $u;
 }
 
 function log_in(int $userId, bool $remember): void
@@ -137,6 +149,31 @@ function log_out(): void
     $_SESSION = [];
     session_regenerate_id(true);
     $_SESSION['csrf'] = bin2hex(random_bytes(32));
+}
+
+/**
+ * Simple sliding-window limiter: true if fewer than $max hits in the last $seconds for this bucket, and records the hit.
+ * Buckets are like 'login:<ip>' or 'signup:<ip>'.
+ */
+function rate_ok(string $bucket, int $max, int $seconds): bool
+{
+    try {
+        db()->prepare('DELETE FROM rate_limits WHERE at < NOW() - INTERVAL 1 DAY')->execute();
+        $st = db()->prepare('SELECT COUNT(*) FROM rate_limits WHERE bucket = ? AND at > NOW() - INTERVAL ? SECOND');
+        $st->execute([$bucket, $seconds]);
+        if ((int)$st->fetchColumn() >= $max) {
+            return false;
+        }
+        db()->prepare('INSERT INTO rate_limits (bucket) VALUES (?)')->execute([$bucket]);
+    } catch (PDOException $e) {
+        // table not there yet: don't lock anyone out
+    }
+    return true;
+}
+
+function client_ip(): string
+{
+    return substr((string)($_SERVER['REMOTE_ADDR'] ?? '0'), 0, 45);
 }
 
 function h(?string $s): string

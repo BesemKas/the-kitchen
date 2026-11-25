@@ -1955,18 +1955,23 @@ const recipeSteps = (r) => (r.steps && r.steps.length ? r.steps
 async function renderRecipes() {
   const [{ recipes }] = await Promise.all([api('recipes.list'), loadProducts()]);
   S.recipes = recipes;
-  view.innerHTML = `
-    <button class="btn primary block" data-act="new">＋ New recipe</button>
-    ${recipes.length ? recipes.map((r) => {
+  const card = (r) => {
       const time = (r.prep_minutes || 0) + (r.cook_minutes || 0);
       const steps = recipeSteps(r).length;
       return `<article class="card stack tap" data-id="${r.id}">
         <div class="row"><h2 class="grow">${esc(r.name)}</h2><span class="num strong">${money(r.cost_per_serving)}<span class="small muted"> /portion</span></span></div>
         <div class="small muted">${r.servings} portion${r.servings > 1 ? 's' : ''} · ${money(r.cost)} a batch${time ? ` · ${fmtMins(time)}` : ''}${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}
+          ${r.mine && r.is_public ? '<span class="tag">shared</span>' : ''}${!r.mine && r.owner_name ? `<span class="tag">by ${esc(r.owner_name)}</span>` : ''}
           ${r.missing_prices ? `<span class="tag warn">${r.missing_prices} unpriced</span>` : ''}</div>
         ${nutriHtml(r.nutrition_per_serving, r.missing_nutrition, r.items.length)}
       </article>`;
-    }).join('') : '<p class="empty">No recipes yet. Add the meals you prep: ingredients come from your products, so cost and nutrition work themselves out.</p>'}`;
+  };
+  const mine = recipes.filter((r) => r.mine);
+  const others = recipes.filter((r) => !r.mine);
+  view.innerHTML = `
+    <button class="btn primary block" data-act="new">＋ New recipe</button>
+    ${mine.length ? mine.map(card).join('') : '<p class="empty">No recipes of your own yet. Add the meals you prep, or copy one below and make it yours.</p>'}
+    ${others.length ? `<h2 class="section-h">Shared by others</h2><p class="small muted">Cook, plan and shop from these. Copy one to change it.</p>${others.map(card).join('')}` : ''}`;
   view.onclick = (e) => {
     if (e.target.closest('[data-act=new]')) return recipeEditor({ id: null, name: '', servings: 4, instructions: '', prep_minutes: null, cook_minutes: null, items: [], steps: [] });
     const card = e.target.closest('[data-id]');
@@ -2016,7 +2021,7 @@ function recipeView(r, portions = r.servings) {
       <section class="card stack">
         <div class="row between">
           <span>Recipe makes <b>${r.servings} portion${r.servings === 1 ? '' : 's'}</b></span>
-          <button type="button" class="btn small" data-act="makes">Change</button>
+          ${r.mine ? '<button type="button" class="btn small" data-act="makes">Change</button>' : ''}
         </div>
         <div class="row between">
           <span class="strong">Cooking this time</span>
@@ -2061,9 +2066,12 @@ function recipeView(r, portions = r.servings) {
         <button class="btn" data-act="fridge">Cooked it → fridge</button>
         <button class="btn" data-act="list">Add to list</button>
         <button class="btn" data-act="plan">Add to plan</button>
-        <button class="btn" data-act="edit">Edit recipe</button>
+        ${r.mine ? '<button class="btn" data-act="edit">Edit recipe</button>' : '<button class="btn" data-act="copy">Copy to my recipes</button>'}
       </div>
-      <button class="btn block danger" data-act="delete">Delete recipe</button>`);
+      ${r.mine ? `<div class="toggle-row static"><span class="grow"><b>Share with everyone</b><span class="small muted block">${r.is_public ? 'Everyone on the app can see, cook and plan this. Only you can change it.' : 'Only you can see this recipe.'}</span></span>
+          <button type="button" class="switch ${r.is_public ? 'on' : ''}" data-act="share" aria-pressed="${r.is_public}" aria-label="Share ${esc(r.name)} with everyone"><i></i></button></div>
+        <button class="btn block danger" data-act="delete">Delete recipe</button>`
+        : `<p class="small muted">Shared by ${esc(r.owner_name || 'a former member')}. Only they can change it.</p>`}`);
     sheetBody.scrollTop = keepY;
     const batch = document.getElementById('batchG');
     const per = () => {
@@ -2085,8 +2093,18 @@ function recipeView(r, portions = r.servings) {
             toast(`${r.name} now makes ${fresh.servings} portions`);
             return recipeView(fresh, fresh.servings);
           }
+          case 'share': {
+            const upd = (await api('recipes.share', { id: r.id, public: !r.is_public })).recipe;
+            toast(upd.is_public ? 'Shared with everyone' : 'Only you can see it now');
+            return recipeView(upd, n);
+          }
+          case 'copy': {
+            const c = (await api('recipes.copy', { id: r.id })).recipe;
+            toast('Copied to your recipes. Change it as you like');
+            return recipeView(c, c.servings);
+          }
           case 'delete':
-            if (!confirm(`Delete ${r.name}? Recipes are shared, so it's deleted for both of you and comes off both meal plans.`)) return;
+            if (!confirm(`Delete ${r.name}? It also comes off your meal plan.`)) return;
             await api('recipes.delete', { id: r.id });
             closeSheet(); toast(`Deleted ${r.name}`); route();
             return;
@@ -2755,6 +2773,11 @@ async function renderBudget() {
       </div>
       <p class="small muted">Logged in as ${esc(S.user.display_name)}.</p>
       <div class="row"><button class="btn small grow" data-act="password">Change password</button><button class="btn small grow" data-act="logout">Log out</button></div>
+      <div class="stack tight"><span class="small muted">Your data</span>
+        <div class="row"><button class="btn small grow" data-act="rename">Change my name</button><button class="btn small grow" data-act="export">Download my data</button></div>
+        <div class="row"><a class="btn small grow" href="./?privacy">How your data is kept</a><button class="btn small grow danger" data-act="delete-account">Delete my account</button></div>
+      </div>
+      ${S.isAdmin ? '<button class="btn block" data-act="admin">People using the app</button>' : ''}
       <p class="small muted" id="dispCheck"></p>
     </section>`;
   document.getElementById('bMeter').style.width = `${Math.min(100, b.budget > 0 ? (b.spent / b.budget) * 100 : 100)}%`;
@@ -2812,6 +2835,29 @@ async function renderBudget() {
       }
       if (t.dataset.act === 'add-trip') return tripSheet();
       if (t.dataset.act === 'log-ta') return takeawaySheet(() => renderBudget());
+      if (t.dataset.act === 'admin') return adminSheet();
+      if (t.dataset.act === 'rename') {
+        const name = prompt('What should the app call you?', S.user.display_name || '');
+        if (name && name.trim()) { await api('account.name', { display_name: name.trim() }); S.user.display_name = name.trim(); toast('Name saved'); }
+        return;
+      }
+      if (t.dataset.act === 'export') {
+        const { export: data } = await api('account.export');
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = `kitchen-budget-${S.user.username}-${iso(new Date())}.json`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        return toast('Downloaded');
+      }
+      if (t.dataset.act === 'delete-account') {
+        const pw = prompt('This deletes your account, list, plan, budget, shops, prices and private recipes for good. Type your password to confirm.');
+        if (!pw) return;
+        await api('account.delete', { password: pw });
+        Object.keys(localStorage).filter((k) => k.startsWith('kb:')).forEach((k) => localStorage.removeItem(k));
+        location.href = './';
+        return;
+      }
       if (t.dataset.act === 'logout') {
         if (queue.length && !confirm(`${queue.length} change${queue.length === 1 ? " hasn't" : "s haven't"} synced yet and will be lost. Log out anyway?`)) return;
         await api('logout');
@@ -2858,16 +2904,95 @@ function passwordSheet() {
   };
 }
 
+/** First screen for someone who just signed up: the three numbers that make the app useful. */
+function welcomeSheet() {
+  openSheet(`${sheetHead(`Welcome, ${S.user.display_name}`)}
+    <p>Three quick things and the app starts working for you. You can change them any time under Budget.</p>
+    <form class="stack" id="wlForm">
+      <label>Monthly grocery budget (R) <input name="budget" type="number" inputmode="decimal" min="0" step="1" placeholder="2500"></label>
+      <label>Payday (day of the month) <input name="payday" type="number" inputmode="numeric" min="1" max="31" step="1" value="25"></label>
+      <label>Daily protein target in grams (optional) <input name="protein" type="number" inputmode="numeric" min="0" step="1" placeholder="120"></label>
+      <button class="btn primary block">Let's go</button>
+    </form>
+    <div class="stack tight small muted">
+      <span><b>Then:</b> scan or add the things you buy, so the app learns your prices.</span>
+      <span>Add a recipe you cook (or copy a shared one), plan your week and tap “Put the week on my list”.</span>
+      <span>Your list, plan and budget are yours alone. <a href="./?privacy">How your data is kept</a></span>
+    </div>`);
+  sheetBody.onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      const data = {};
+      if (f.budget.value) data.monthly_budget = f.budget.value;
+      if (f.payday.value) data.payday = f.payday.value;
+      if (Object.keys(data).length) { const r = await api('budget.set', data); S.period = r.period; if (data.monthly_budget) S.budget = Number(data.monthly_budget); }
+      if (f.protein.value) await api('account.targets', { protein_target_g: f.protein.value });
+      closeSheet(); updatePill(); route();
+      toast('All set');
+    } catch (er) { fail(er); }
+  };
+}
+
+/** Admin: who's using the app, reset links, switch accounts off, open or close sign-ups. */
+async function adminSheet() {
+  const draw = (users, open) => {
+    const ago = (d) => {
+      if (!d) return 'never';
+      const days = Math.floor((Date.now() - new Date(d.replace(' ', 'T')).getTime()) / 86400000);
+      return days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
+    };
+    openSheet(`${sheetHead('People using the app')}
+      <div class="toggle-row static"><span class="grow"><b>New people can sign up</b><span class="small muted block">${open ? 'Anyone with the link can make an account.' : 'Sign-ups are closed. Existing people can still log in.'}</span></span>
+        <button type="button" class="switch ${open ? 'on' : ''}" data-act="signups" aria-pressed="${open}" aria-label="Allow sign-ups"><i></i></button></div>
+      <ul class="list card flush">${users.map((u) => `<li data-id="${u.id}" class="admin-user">
+        <div class="grow"><div class="name">${esc(u.display_name)} <span class="muted small">@${esc(u.username)}</span>${Number(u.is_admin) ? ' <span class="tag">admin</span>' : ''}${Number(u.disabled) ? ' <span class="tag warn">switched off</span>' : ''}</div>
+          <div class="sub">joined ${esc(String(u.created_at).slice(0, 10))} · last used ${ago(u.last_seen)} · ${u.recipes} recipe${Number(u.recipes) === 1 ? '' : 's'} · ${u.trips} shops logged</div>
+          ${u.id === S.user.id ? '' : `<div class="row wrap gap admin-actions">
+            <button type="button" class="btn small" data-act="reset">Password reset link</button>
+            <button type="button" class="btn small" data-act="toggle">${Number(u.disabled) ? 'Switch on' : 'Switch off'}</button>
+            <button type="button" class="btn small ghost" data-act="mkadmin">${Number(u.is_admin) ? 'Remove admin' : 'Make admin'}</button></div>`}
+        </div></li>`).join('')}</ul>
+      <p class="small muted">A reset link works once, for 24 hours. Send it to them yourself, e.g. on WhatsApp.</p>`);
+    sheetBody.onclick = async (e) => {
+      const t = e.target.closest('[data-act]');
+      if (!t) return;
+      const li = t.closest('li');
+      const u = li ? users.find((x) => x.id === Number(li.dataset.id)) : null;
+      try {
+        if (t.dataset.act === 'signups') { const r = await api('admin.signups', { open: !open }); return draw(users, r.signups_open); }
+        if (t.dataset.act === 'reset') {
+          const { token } = await api('admin.reset', { user_id: u.id });
+          const link = `${location.origin}${location.pathname}?reset=${token}`;
+          if (navigator.share) { try { await navigator.share({ title: 'Kitchen Budget password reset', text: `Set a new Kitchen Budget password (link works once, for 24 hours): ${link}` }); return; } catch { /* fall back to copying */ } }
+          try { await navigator.clipboard.writeText(link); toast(`Reset link for ${u.display_name} copied. Send it to them`); } catch { prompt('Copy this link and send it:', link); }
+          return;
+        }
+        if (t.dataset.act === 'toggle') {
+          if (!Number(u.disabled) && !confirm(`Switch off ${u.display_name}'s account? They can't log in until you switch it back on. Nothing is deleted.`)) return;
+          await api('admin.disable', { user_id: u.id, disabled: !Number(u.disabled) });
+        }
+        if (t.dataset.act === 'mkadmin') await api('admin.admin', { user_id: u.id, admin: !Number(u.is_admin) });
+        const r = await api('admin.users');
+        draw(r.users.map((x) => ({ ...x, id: Number(x.id) })), r.signups_open);
+      } catch (er) { fail(er); }
+    };
+  };
+  const r = await api('admin.users');
+  draw(r.users.map((x) => ({ ...x, id: Number(x.id) })), r.signups_open);
+}
+
 /* ---------- start ---------- */
 (async function init() {
   try {
     const b = await api('bootstrap');
     Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader,
-      alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday });
+      alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday, isAdmin: !!b.is_admin, signupsOpen: !!b.signups_open });
     const saved = store.get('store', null);
     S.storeId = S.stores.some((s) => String(s.id) === String(saved)) ? String(saved) : (S.stores[0] ? String(S.stores[0].id) : null);
     store.set('budgetDate', null);
     updatePill();
+    if (location.hash === '#welcome') { history.replaceState(null, '', '#list'); route(); welcomeSheet(); return; }
     route();
   } catch (e) {
     view.innerHTML = `<p class="error">${esc(e.message)}</p>`;

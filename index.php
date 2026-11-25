@@ -5,25 +5,104 @@ send_security_headers();
 start_session();
 
 $error = '';
+$notice = '';
+$page = isset($_GET['signup']) ? 'signup' : (isset($_GET['reset']) ? 'reset' : (isset($_GET['privacy']) ? 'privacy' : 'login'));
+$signupsOpen = setting('signups_open', '1') === '1';
+$formOk = fn() => hash_equals(csrf_token(), $_POST['csrf'] ?? '');
+
 if (($_POST['action'] ?? '') === 'login') {
-    if (!hash_equals(csrf_token(), $_POST['csrf'] ?? '')) {
+    if (!$formOk()) {
         $error = 'Form expired, try again.';
+    } elseif (!rate_ok('login:' . client_ip(), 10, 900)) {
+        $error = 'Too many tries. Wait 15 minutes and try again.';
     } else {
-        $st = db()->prepare('SELECT id, password_hash FROM users WHERE username = ?');
+        $st = db()->prepare('SELECT * FROM users WHERE username = ?');
         $st->execute([strtolower(trim($_POST['username'] ?? ''))]);
         $row = $st->fetch();
         if ($row && password_verify($_POST['password'] ?? '', $row['password_hash'])) {
-            log_in((int)$row['id'], !empty($_POST['remember']));
+            if (!empty($row['disabled'])) {
+                $error = 'This account is switched off. Ask the person who runs the app.';
+            } else {
+                log_in((int)$row['id'], !empty($_POST['remember']));
+                header('Location: ' . base_path());
+                exit;
+            }
+        } else {
+            sleep(1);
+            $error = 'Wrong username or password.';
+        }
+    }
+}
+
+if (($_POST['action'] ?? '') === 'signup') {
+    $page = 'signup';
+    $username = strtolower(trim((string)($_POST['username'] ?? '')));
+    $name = trim((string)($_POST['display_name'] ?? ''));
+    $pass = (string)($_POST['password'] ?? '');
+    $started = (int)($_POST['t'] ?? 0);
+    $sig = (string)($_POST['ts'] ?? '');
+    if (!$signupsOpen) {
+        $error = 'Sign-ups are closed right now.';
+    } elseif (!$formOk() || !hash_equals(hash_hmac('sha256', (string)$started, csrf_token()), $sig)) {
+        $error = 'Form expired, try again.';
+    } elseif (($_POST['website'] ?? '') !== '' || time() - $started < 3) {
+        $error = 'Something went wrong. Try again.';   // bot trap: hidden field filled in, or sent too fast
+    } elseif (!rate_ok('signup:' . client_ip(), 5, 86400)) {
+        $error = 'Too many new accounts from here today. Try again tomorrow.';
+    } elseif (!preg_match('/^[a-z0-9._-]{3,30}$/', $username)) {
+        $error = 'Username: 3–30 letters, numbers, dots, dashes or underscores.';
+    } elseif ($name === '' || mb_strlen($name) > 60) {
+        $error = 'What should we call you?';
+    } elseif (strlen($pass) < 8) {
+        $error = 'Password must be at least 8 characters.';
+    } elseif ($pass !== (string)($_POST['password2'] ?? '')) {
+        $error = "The passwords don't match.";
+    } else {
+        $st = db()->prepare('SELECT 1 FROM users WHERE username = ?');
+        $st->execute([$username]);
+        if ($st->fetchColumn()) {
+            $error = 'That username is taken.';
+        } else {
+            db()->prepare('INSERT INTO users (username, display_name, password_hash) VALUES (?, ?, ?)')
+                ->execute([$username, $name, password_hash($pass, PASSWORD_DEFAULT)]);
+            log_in((int)db()->lastInsertId(), true);
+            header('Location: ' . base_path() . '#welcome');
+            exit;
+        }
+    }
+}
+
+$resetUser = null;
+if ($page === 'reset') {
+    $tok = (string)($_GET['reset'] ?? '');
+    if (preg_match('/^[a-f0-9]{48}$/', $tok)) {
+        $st = db()->prepare('SELECT user_id FROM password_resets WHERE token_hash = ? AND expires_at > NOW()');
+        $st->execute([hash('sha256', $tok)]);
+        $resetUser = $st->fetchColumn() ?: null;
+    }
+    if (!$resetUser) {
+        $error = 'This reset link has expired or was already used. Ask for a new one.';
+    } elseif (($_POST['action'] ?? '') === 'reset') {
+        $pass = (string)($_POST['password'] ?? '');
+        if (!$formOk()) {
+            $error = 'Form expired, try again.';
+        } elseif (strlen($pass) < 8) {
+            $error = 'Password must be at least 8 characters.';
+        } elseif ($pass !== (string)($_POST['password2'] ?? '')) {
+            $error = "The passwords don't match.";
+        } else {
+            db()->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([password_hash($pass, PASSWORD_DEFAULT), $resetUser]);
+            db()->prepare('DELETE FROM password_resets WHERE user_id = ?')->execute([$resetUser]);
+            db()->prepare('DELETE FROM auth_tokens WHERE user_id = ?')->execute([$resetUser]);
+            log_in((int)$resetUser, true);
             header('Location: ' . base_path());
             exit;
         }
-        sleep(1);
-        $error = 'Wrong username or password.';
     }
 }
 
 $user = current_user();
-if ($user) {
+if ($user && $page !== 'privacy') {
     header('X-Kitchen-Shell: 1');   // lets the service worker keep this page for offline use
 }
 ?><!doctype html>
@@ -39,14 +118,51 @@ if ($user) {
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
-<link rel="stylesheet" href="assets/app.css?v=14">
+<link rel="stylesheet" href="assets/app.css?v=15">
 </head>
-<?php if (!$user): ?>
+<?php if (!$user || $page === 'privacy'): ?>
 <body class="auth">
 <main class="card auth-card">
   <h1>Kitchen Budget</h1>
   <?php if ($error): ?><p class="error"><?= h($error) ?></p><?php endif; ?>
+<?php if ($page === 'privacy'): ?>
+  <h2>Your data</h2>
+  <div class="stack small">
+    <p>Kitchen Budget is a small personal app. It keeps what you type or scan: your username, display name, a hashed password (nobody can read it), shopping lists, shops and prices, meal plans, cooked portions, budget, takeaways, ingredient alerts and the recipes you add.</p>
+    <p><b>Who sees it:</b> only you. Product facts (names, barcodes, nutrition, label photos) are shared with everyone so a scan helps all users. Recipes are private unless you tap “Share with everyone”.</p>
+    <p><b>Where it lives:</b> on the app's web host in a MySQL database, with nightly backups. It is never sold or shared. Barcodes are looked up on Open Food Facts; if label reading is switched on, label photos are sent to Anthropic's Claude to read the numbers.</p>
+    <p><b>Your rights:</b> under Budget → Settings you can download everything the app holds about you, or delete your account and all your data.</p>
+  </div>
+  <a class="btn" href="./">Back</a>
+<?php elseif ($page === 'signup'): ?>
+  <?php if (!$signupsOpen): ?>
+    <p>Sign-ups are closed right now.</p><a class="btn" href="./">Log in</a>
+  <?php else: $t = time(); ?>
+  <form method="post" class="stack" autocomplete="on">
+    <input type="hidden" name="action" value="signup">
+    <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+    <input type="hidden" name="t" value="<?= $t ?>">
+    <input type="hidden" name="ts" value="<?= h(hash_hmac('sha256', (string)$t, csrf_token())) ?>">
+    <label class="hp" aria-hidden="true">Website <input name="website" tabindex="-1" autocomplete="off"></label>
+    <label>Your name <input name="display_name" required maxlength="60" value="<?= h($_POST['display_name'] ?? '') ?>" autocomplete="given-name"></label>
+    <label>Username <input name="username" required autocapitalize="none" pattern="[a-zA-Z0-9._-]{3,30}" value="<?= h($_POST['username'] ?? '') ?>" autocomplete="username"></label>
+    <label>Password <input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+    <label>Password again <input name="password2" type="password" required minlength="8" autocomplete="new-password"></label>
+    <p class="small muted">Your list, plan and budget are yours alone. <a href="?privacy">How your data is kept</a></p>
+    <button class="btn primary" type="submit">Create my account</button>
+  </form>
+  <a class="small" href="./">I already have an account</a>
+  <?php endif; ?>
+<?php elseif ($page === 'reset' && $resetUser): ?>
   <form method="post" class="stack">
+    <input type="hidden" name="action" value="reset">
+    <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+    <label>New password <input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+    <label>New password again <input name="password2" type="password" required minlength="8" autocomplete="new-password"></label>
+    <button class="btn primary" type="submit">Set password and log in</button>
+  </form>
+<?php else: ?>
+  <form method="post" class="stack" action="./">
     <input type="hidden" name="action" value="login">
     <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
     <label>Username <input name="username" autocomplete="username" autocapitalize="none" required></label>
@@ -54,6 +170,9 @@ if ($user) {
     <label class="row"><input type="checkbox" name="remember" value="1" checked> Keep me logged in</label>
     <button class="btn primary" type="submit">Log in</button>
   </form>
+  <?php if ($signupsOpen): ?><a class="btn" href="?signup">Create an account</a><?php endif; ?>
+  <p class="small muted">Forgot your password? Ask the person who runs the app for a reset link. · <a href="?privacy">Your data</a></p>
+<?php endif; ?>
 </main>
 </body>
 <?php else: ?>
@@ -74,7 +193,7 @@ if ($user) {
 <div id="sheet" class="sheet" hidden><div class="sheet-body" id="sheetBody"></div></div>
 <div id="toast" class="toast" hidden></div>
 <script src="assets/zxing-browser.min.js"></script>
-<script src="assets/app.js?v=14"></script>
+<script src="assets/app.js?v=15"></script>
 </body>
 <?php endif; ?>
 </html>
