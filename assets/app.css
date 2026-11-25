@@ -559,3 +559,8 @@ button.pick { display: flex; width: 100%; text-align: left; padding: 12px 14px; 
 .list li.shop-row { flex-wrap: wrap; row-gap: 6px; }
 .list li.shop-row > .grow { flex: 1 1 100%; min-width: 0; }
 .list li.shop-row > .btn { flex: 1 1 auto; }
+
+/* shopping list: the name side of a row opens the product */
+.list li .grow.tap { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.list li .grow.tap:active .name { opacity: .7; }
+.list li .sub .linklike.hint { padding: 0; font: inherit; color: var(--warn); }
