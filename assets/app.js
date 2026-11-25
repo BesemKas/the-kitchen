@@ -1357,13 +1357,12 @@ function openScanner(onCode) {
     return;
   }
   // a sharp picture with the focus following the barcode: most "finicky" scans are blur
-  // ask plainly (iPhones can hang on fancier requests), then sharpen once the camera is running
-  const constraints = { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } };
+  // exactly what worked before: just the back camera. iPhones black out if the stream is reconfigured.
+  const constraints = { facingMode: { ideal: 'environment' } };
   const slow = setTimeout(() => { if (!done) hint('Struggling? Add light (torch), move a little further away so it focuses, or type the number.'); }, 8000);
   const afterStart = () => {
     const track = video.srcObject && video.srcObject.getVideoTracks ? video.srcObject.getVideoTracks()[0] : null;
     const caps = track && track.getCapabilities ? track.getCapabilities() : {};
-    if (caps.focusMode && caps.focusMode.includes('continuous')) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
     if (caps.torch) {
       const btn = document.getElementById('scanTorch');
       if (!btn) return;
@@ -1409,7 +1408,7 @@ function openScanner(onCode) {
     if (!window.ZXingBrowser) { hint('The scanner didn’t load. Type the barcode instead.'); return; }
     const F = ZXingBrowser.BarcodeFormat;
     const hints = new Map([[2, [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E]], [3, true]]);   // POSSIBLE_FORMATS, TRY_HARDER
-    const reader = new ZXingBrowser.BrowserMultiFormatOneDReader(hints, { delayBetweenScanAttempts: 100, delayBetweenScanSuccess: 300 });
+    const reader = new ZXingBrowser.BrowserMultiFormatOneDReader(hints, { delayBetweenScanAttempts: 150, delayBetweenScanSuccess: 300 });
     reader.decodeFromConstraints({ video: constraints }, video, (result) => { if (result) finish(result.getText()); })
       .then((c) => {
         if (sheet.hidden || done) { c.stop(); return; }
