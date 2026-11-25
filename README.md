@@ -154,3 +154,17 @@ A shared recipe is costed with the prices of the person looking at it.
 - **Freezer:** freeze or thaw cooked portions. Fridge portions warn on day 3 (day 2 after thawing). Eating a planned meal takes from the fridge first.
 - **Pay months:** set your payday (Budget → Settings). Use "I got paid today" for early December pay; that date replaces the usual payday nearby.
 - **Logging a takeaway** shows what's ready in the fridge and how many prepped meals the takeaway equals.
+
+## Accounts for more people
+
+- **Sign-up:** "Create an account" on the login page. It's protected by a hidden bot field, a minimum time to fill in the form, and a limit of 5 accounts per address per day. An admin can close sign-ups.
+- **Login:** limited to 10 failed tries per 15 minutes per address. Switched-off accounts can't log in.
+- **Admin** (Budget → Settings → People using the app):
+  - see who joined and when they last used the app
+  - make a one-time password reset link (24 hours) to send yourself
+  - switch accounts off or on, make or remove admins
+  - open or close sign-ups
+- **Recipes** are private unless you switch on "Share with everyone". Shared recipes can be cooked, planned and shopped from by anyone, but only the owner can change them; "Copy to my recipes" makes your own editable copy. A recipe that someone has in their plan can't be deleted, only unshared.
+- **Products** stay shared. Only the person who added a product (or an admin) can delete it.
+- **Your data** (POPIA): Budget → Settings → Download my data (JSON) or Delete my account. The privacy page is at `./?privacy`.
+- New accounts get a welcome screen for budget, payday and protein target.

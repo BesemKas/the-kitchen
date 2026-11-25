@@ -479,3 +479,19 @@ body.typing .addbar { bottom: 8px; }
 .fridge-row .fr-bottom .sub { flex-basis: 100%; }
 .xray-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .xray-chips .xr { font-size: 12px; cursor: inherit; }
+
+/* accounts */
+.hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+.section-h { margin: 8px 0 -4px; font-size: 1.1rem; }
+.toggle-row.static { cursor: default; }
+button.switch { border: 0; cursor: pointer; }
+.admin-user { align-items: flex-start; }
+.admin-actions { margin-top: 8px; }
+.btn.danger { color: var(--bad); }
+/* grid columns never grow past the screen because of a wide child (e.g. the 4 nutrition boxes) */
+.sheet-body, .stack, .view { grid-template-columns: minmax(0, 1fr); }
+.nutri { min-width: 0; }
+.grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid2 > .btn, .grid3 > .btn { white-space: normal; min-width: 0; }
+.nutri { grid-template-columns: repeat(4, minmax(0, 1fr)); }

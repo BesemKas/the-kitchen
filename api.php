@@ -123,6 +123,20 @@ function best_price(array $byStore): ?float
     return $min;
 }
 
+/** A recipe this person may use (theirs, shared, or in their plan/fridge). */
+function can_see_recipe(int $id): bool
+{
+    return (bool)recipes_with_costs($id);
+}
+
+/** A recipe this person owns (only the owner edits, shares or deletes it). */
+function own_recipe(int $id): void
+{
+    if (!q('SELECT 1 FROM recipes WHERE id = ? AND user_id = ?', [$id, me()])->fetchColumn()) {
+        fail("Only the person who added this recipe can change it. Make a copy to change yours.", 403);
+    }
+}
+
 /** The logged-in person. Everything except recipes and product facts belongs to one person. */
 function me(): int
 {
@@ -250,9 +264,11 @@ function nutrition_factor(string $unit, float $amount): float
 
 function recipes_with_costs(?int $onlyId = null): array
 {
+    // your own recipes, shared ones, and any you have in your plan or fridge (so a recipe someone unshares doesn't vanish from your week)
+    $visible = '(r.user_id = ? OR r.is_public = 1 OR r.id IN (SELECT recipe_id FROM plan WHERE user_id = ?) OR r.id IN (SELECT recipe_id FROM fridge WHERE user_id = ? AND recipe_id IS NOT NULL))';
     $recipes = $onlyId === null
-        ? q('SELECT * FROM recipes ORDER BY name')->fetchAll()
-        : q('SELECT * FROM recipes WHERE id = ?', [$onlyId])->fetchAll();
+        ? q("SELECT r.*, u.display_name owner_name FROM recipes r LEFT JOIN users u ON u.id = r.user_id WHERE $visible ORDER BY r.name", [me(), me(), me()])->fetchAll()
+        : q("SELECT r.*, u.display_name owner_name FROM recipes r LEFT JOIN users u ON u.id = r.user_id WHERE r.id = ? AND $visible", [$onlyId, me(), me(), me()])->fetchAll();
     if (!$recipes) {
         return [];
     }
@@ -330,6 +346,9 @@ function recipes_with_costs(?int $onlyId = null): array
             'missing_prices' => $missing,
             'nutrition_per_serving' => $perServing,
             'missing_nutrition' => $nutMissing,
+            'mine' => (int)$r['user_id'] === me(),
+            'is_public' => (int)$r['is_public'] === 1,
+            'owner_name' => $r['owner_name'] ?? null,
         ];
     }
     return $result;
@@ -722,6 +741,7 @@ try {
 
         case 'bootstrap':
             $month = date('Y-m');
+            q('UPDATE users SET last_seen = NOW() WHERE id = ?', [$uid]);
             if (!q('SELECT 1 FROM stores WHERE user_id = ? LIMIT 1', [$uid])->fetchColumn()) {
                 // a fresh account starts with the usual shops (no prices yet)
                 foreach (DEFAULT_STORES as $n) {
@@ -744,6 +764,8 @@ try {
                 'alerts' => alert_prefs(),
                 'takeaway_weekly' => (float)user_setting('takeaway_weekly', '100'),
                 'label_reader' => (string)config('anthropic_key', '') !== '',
+                'is_admin' => !empty($user['is_admin']),
+                'signups_open' => setting('signups_open', '1') === '1',
                 'month' => $month,
                 'currency' => config('currency', 'R'),
             ]);
@@ -897,6 +919,8 @@ try {
             if ($id) {
                 q('UPDATE products SET ' . implode(', ', array_map(fn($c) => "$c = ?", $cols)) . ' WHERE id = ?', [...array_values($fields), $id]);
             } else {
+                $fields['created_by'] = $uid;
+                $cols = array_keys($fields);
                 q('INSERT INTO products (' . implode(', ', $cols) . ') VALUES (' . implode(', ', array_fill(0, count($cols), '?')) . ')', array_values($fields));
                 $id = (int)db()->lastInsertId();
             }
@@ -922,7 +946,16 @@ try {
                                   WHERE pr.product_id = ? ORDER BY pr.id DESC LIMIT 50', [$uid, int_in($in, 'id')])->fetchAll()]);
 
         case 'products.delete':
-            q('DELETE FROM products WHERE id = ?', [int_in($in, 'id')]);
+            // products are shared by everyone: only the person who added it (or an admin) can delete it
+            $pid = int_in($in, 'id');
+            $by = q('SELECT created_by FROM products WHERE id = ?', [$pid])->fetchColumn();
+            if ($by === false) {
+                fail('Not found', 404);
+            }
+            if ((int)$by !== $uid && empty($user['is_admin'])) {
+                fail('Other people use this product. Only the person who added it can delete it.', 403);
+            }
+            q('DELETE FROM products WHERE id = ?', [$pid]);
             out(['ok' => true]);
 
         // ----- shopping list -----
@@ -1053,11 +1086,12 @@ try {
             $vals = [$name, $servings, $instructions, $prep === null ? null : (int)$prep, $cook === null ? null : (int)$cook];
             db()->beginTransaction();
             if ($id) {
+                own_recipe($id);
                 q('UPDATE recipes SET name = ?, servings = ?, instructions = ?, prep_minutes = ?, cook_minutes = ? WHERE id = ?', [...$vals, $id]);
                 q('DELETE FROM recipe_items WHERE recipe_id = ?', [$id]);
                 q('DELETE FROM recipe_steps WHERE recipe_id = ?', [$id]);
             } else {
-                q('INSERT INTO recipes (name, servings, instructions, prep_minutes, cook_minutes) VALUES (?, ?, ?, ?, ?)', $vals);
+                q('INSERT INTO recipes (name, servings, instructions, prep_minutes, cook_minutes, user_id) VALUES (?, ?, ?, ?, ?, ?)', [...$vals, $uid]);
                 $id = (int)db()->lastInsertId();
             }
             foreach (array_values((array)($in['items'] ?? [])) as $i => $it) {
@@ -1083,16 +1117,44 @@ try {
 
         case 'recipes.servings':
             // how many portions the recipe's batch makes; the ingredients stay the same
+            own_recipe(int_in($in, 'id'));
             q('UPDATE recipes SET servings = ? WHERE id = ?', [(int)(num_in($in, 'servings', null, 1, 100) ?? fail('How many portions?')), int_in($in, 'id')]);
             out(['ok' => true]);
 
         case 'recipes.delete':
-            q('DELETE FROM recipes WHERE id = ?', [int_in($in, 'id')]);
+            $rid = int_in($in, 'id');
+            own_recipe($rid);
+            $others = (int)q('SELECT COUNT(DISTINCT user_id) FROM plan WHERE recipe_id = ? AND user_id <> ?', [$rid, $uid])->fetchColumn();
+            if ($others) {
+                fail($others === 1 ? 'Someone else has this recipe in their meal plan. Unshare it instead, so nobody new can add it.' : "$others people have this recipe in their meal plan. Unshare it instead, so nobody new can add it.");
+            }
+            q('DELETE FROM recipes WHERE id = ?', [$rid]);
             out(['ok' => true]);
+
+        case 'recipes.share':
+            $rid = int_in($in, 'id');
+            own_recipe($rid);
+            q('UPDATE recipes SET is_public = ? WHERE id = ?', [!empty($in['public']) ? 1 : 0, $rid]);
+            out(['recipe' => recipes_with_costs($rid)[0]]);
+
+        case 'recipes.copy':
+            // your own private copy of a recipe you can see, to change as you like
+            $rid = int_in($in, 'id');
+            can_see_recipe($rid) || fail('Recipe not found', 404);
+            $r = q('SELECT * FROM recipes WHERE id = ?', [$rid])->fetch();
+            db()->beginTransaction();
+            q('INSERT INTO recipes (name, servings, instructions, prep_minutes, cook_minutes, user_id, is_public) VALUES (?, ?, ?, ?, ?, ?, 0)',
+                [mb_substr($r['name'], 0, 120), $r['servings'], $r['instructions'], $r['prep_minutes'], $r['cook_minutes'], $uid]);
+            $new = (int)db()->lastInsertId();
+            q('INSERT INTO recipe_items (recipe_id, product_id, amount, note, sort) SELECT ?, product_id, amount, note, sort FROM recipe_items WHERE recipe_id = ?', [$new, $rid]);
+            q('INSERT INTO recipe_steps (recipe_id, sort, body, timer_minutes) SELECT ?, sort, body, timer_minutes FROM recipe_steps WHERE recipe_id = ?', [$new, $rid]);
+            db()->commit();
+            out(['recipe' => recipes_with_costs($new)[0]]);
 
         case 'recipes.to_list':
             // add the packs needed for one batch of a recipe at a chosen number of portions
             $rid = int_in($in, 'id');
+            can_see_recipe($rid) || fail('Recipe not found', 404);
             $portions = num_in($in, 'portions', null, 0.25, 500) ?? fail('Missing portions');
             $need = q('SELECT ri.product_id, p.name, p.pack_size, ri.amount * ? / r.servings amount
                        FROM recipe_items ri JOIN recipes r ON r.id = ri.recipe_id JOIN products p ON p.id = ri.product_id
@@ -1230,6 +1292,7 @@ try {
             $slot = in_array($in['slot'] ?? '', SLOTS, true) ? $in['slot'] : fail('Bad slot');
             $id = int_in($in, 'id', false);
             $vals = [date_in($in, 'date'), $slot, int_in($in, 'recipe_id'), num_in($in, 'servings', 1, 0.25, 50)];
+            can_see_recipe($vals[2]) || fail('Recipe not found', 404);
             if ($id) {
                 q('UPDATE plan SET plan_date = ?, slot = ?, recipe_id = ?, servings = ? WHERE id = ? AND user_id = ?', [...$vals, $id, $uid]);
             } else {
@@ -1254,6 +1317,10 @@ try {
                 $e = (array)$e;
                 $slot = in_array($e['slot'] ?? '', SLOTS, true) ? $e['slot'] : fail('Bad slot');
                 $clean[] = [date_in($e, 'date'), $slot, int_in($e, 'recipe_id'), num_in($e, 'servings', 1, 0.25, 50)];
+                $seenRecipes[$clean[count($clean) - 1][2]] = true;
+            }
+            foreach (array_keys($seenRecipes ?? []) as $rid) {
+                can_see_recipe($rid) || fail('Recipe not found', 404);
             }
             db()->beginTransaction();
             $added = 0;
@@ -1416,6 +1483,90 @@ try {
             q('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash((string)$in['new'], PASSWORD_DEFAULT), $uid]);
             q('DELETE FROM auth_tokens WHERE user_id = ?', [$uid]);
             out(['ok' => true]);
+
+        case 'account.name':
+            $name = str_in($in, 'display_name', 60, true);
+            q('UPDATE users SET display_name = ? WHERE id = ?', [$name, $uid]);
+            out(['ok' => true]);
+
+        case 'account.export':
+            // everything the app holds about you (POPIA: your right to see your information)
+            $mine = fn(string $sql) => q($sql, [$uid])->fetchAll();
+            out(['export' => [
+                'exported_at' => date('c'),
+                'account' => q('SELECT username, display_name, created_at, last_seen, protein_target_g, kj_target FROM users WHERE id = ?', [$uid])->fetch(),
+                'settings' => $mine('SELECT k, v FROM user_settings WHERE user_id = ?'),
+                'shops' => $mine('SELECT id, name FROM stores WHERE user_id = ?'),
+                'prices' => $mine('SELECT p.name product, s.name shop, pr.price, pr.recorded_at FROM prices pr JOIN stores s ON s.id = pr.store_id JOIN products p ON p.id = pr.product_id WHERE s.user_id = ?'),
+                'shopping_list' => $mine('SELECT name, qty, checked, created_at FROM list_items WHERE user_id = ?'),
+                'pantry' => $mine('SELECT p.name, pa.amount, pa.bought_count, pa.last_bought FROM pantry pa JOIN products p ON p.id = pa.product_id WHERE pa.user_id = ?'),
+                'meal_plan' => $mine('SELECT pl.plan_date, pl.slot, r.name recipe, pl.servings, pl.eaten_at FROM plan pl JOIN recipes r ON r.id = pl.recipe_id WHERE pl.user_id = ?'),
+                'cooked_portions' => $mine('SELECT name, portions, cooked_on, location FROM fridge WHERE user_id = ?'),
+                'shops_and_takeaways' => $mine('SELECT trip_date, kind, total, estimate, note FROM trips WHERE user_id = ?'),
+                'pay_dates' => $mine('SELECT paid_on FROM pay_dates WHERE user_id = ?'),
+                'ingredient_alerts' => $mine('SELECT code, mode FROM ingredient_alerts WHERE user_id = ?'),
+                'my_recipes' => array_values(array_filter(recipes_with_costs(), fn($r) => $r['mine'])),
+            ]]);
+
+        case 'account.delete':
+            // delete the account and everything that is only yours (POPIA: your right to deletion)
+            $row = q('SELECT password_hash, is_admin FROM users WHERE id = ?', [$uid])->fetch();
+            if (!password_verify((string)($in['password'] ?? ''), $row['password_hash'])) {
+                fail('Password is wrong');
+            }
+            if ((int)$row['is_admin'] === 1 && !q('SELECT 1 FROM users WHERE is_admin = 1 AND id <> ? AND disabled = 0', [$uid])->fetchColumn()) {
+                fail('You run this app. Make someone else an admin first.');
+            }
+            db()->beginTransaction();
+            q('DELETE FROM trips WHERE user_id = ?', [$uid]);
+            q('DELETE FROM fridge WHERE user_id = ?', [$uid]);
+            // private recipes go, except ones someone else still has in their plan or fridge (those stay, ownerless)
+            q('DELETE r FROM recipes r WHERE r.user_id = ? AND r.is_public = 0
+                 AND r.id NOT IN (SELECT recipe_id FROM (SELECT recipe_id FROM plan WHERE user_id <> ?) x)
+                 AND r.id NOT IN (SELECT recipe_id FROM (SELECT recipe_id FROM fridge WHERE user_id <> ? AND recipe_id IS NOT NULL) y)', [$uid, $uid, $uid]);
+            q('DELETE FROM users WHERE id = ?', [$uid]);   // the rest goes with the account (cascades)
+            db()->commit();
+            log_out();
+            out(['ok' => true]);
+
+        case 'admin.users':
+            empty($user['is_admin']) && fail('Admins only', 403);
+            out(['users' => q('SELECT u.id, u.username, u.display_name, u.created_at, u.last_seen, u.is_admin, u.disabled,
+                                      (SELECT COUNT(*) FROM recipes r WHERE r.user_id = u.id) recipes,
+                                      (SELECT COUNT(*) FROM trips t WHERE t.user_id = u.id) trips
+                               FROM users u ORDER BY u.created_at')->fetchAll(),
+                'signups_open' => setting('signups_open', '1') === '1']);
+
+        case 'admin.reset':
+            // a one-time link (24 hours) to set a new password; send it to them yourself
+            empty($user['is_admin']) && fail('Admins only', 403);
+            $target = int_in($in, 'user_id');
+            $tok = bin2hex(random_bytes(24));
+            q('DELETE FROM password_resets WHERE user_id = ?', [$target]);
+            q('INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES (?, ?, NOW() + INTERVAL 1 DAY)', [hash('sha256', $tok), $target]);
+            out(['token' => $tok]);
+
+        case 'admin.disable':
+            empty($user['is_admin']) && fail('Admins only', 403);
+            $target = int_in($in, 'user_id');
+            $target === $uid && fail("You can't switch off your own account");
+            q('UPDATE users SET disabled = ? WHERE id = ?', [!empty($in['disabled']) ? 1 : 0, $target]);
+            if (!empty($in['disabled'])) {
+                q('DELETE FROM auth_tokens WHERE user_id = ?', [$target]);
+            }
+            out(['ok' => true]);
+
+        case 'admin.admin':
+            empty($user['is_admin']) && fail('Admins only', 403);
+            $target = int_in($in, 'user_id');
+            $target === $uid && fail('You are already an admin');
+            q('UPDATE users SET is_admin = ? WHERE id = ?', [!empty($in['admin']) ? 1 : 0, $target]);
+            out(['ok' => true]);
+
+        case 'admin.signups':
+            empty($user['is_admin']) && fail('Admins only', 403);
+            set_setting('signups_open', !empty($in['open']) ? '1' : '0');
+            out(['signups_open' => !empty($in['open'])]);
 
         default:
             fail('Unknown action', 404);
