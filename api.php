@@ -814,6 +814,11 @@ try {
             db()->commit();
             out(['recipe' => recipes_with_costs($id)[0]]);
 
+        case 'recipes.servings':
+            // how many portions the recipe's batch makes; the ingredients stay the same
+            q('UPDATE recipes SET servings = ? WHERE id = ?', [(int)(num_in($in, 'servings', null, 1, 100) ?? fail('How many portions?')), int_in($in, 'id')]);
+            out(['ok' => true]);
+
         case 'recipes.delete':
             q('DELETE FROM recipes WHERE id = ?', [int_in($in, 'id')]);
             out(['ok' => true]);
