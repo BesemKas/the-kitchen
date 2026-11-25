@@ -118,7 +118,7 @@ const store = {
  * Shopping-list changes made offline go into a queue, are applied to the saved copy straight away,
  * and are sent in order when the connection comes back. Each queued change has an op_id so the
  * server ignores it if it already arrived. */
-const READS = new Set(['bootstrap', 'list.get', 'products.list', 'plan.get', 'recipes.list', 'fridge.list', 'budget.get', 'takeaway.get']);
+const READS = new Set(['bootstrap', 'list.get', 'products.list', 'plan.get', 'recipes.list', 'fridge.list', 'budget.get', 'takeaway.get', 'diary.get']);
 const QUEUEABLE = new Set(['list.add', 'list.update', 'list.delete', 'list.clear', 'list.checkout', 'products.price']);
 const lsGet = (k, d = null) => { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* full or blocked */ } };
@@ -806,29 +806,190 @@ async function renderList() {
 
 /* ---------- Today: what am I eating, and am I on track? ---------- */
 async function renderToday() {
-  const { spent, budget, takeaway, fridge, today: todayMeals, last_shop: lastShop, period } = await api('list.get');
+  const todayIso = iso(new Date());
+  const day = S.diaryDay && S.diaryDay <= todayIso ? S.diaryDay : todayIso;
+  const isToday = day === todayIso;
+  const [home, d] = await Promise.all([api('list.get'), api('diary.get', { date: day })]);
+  const { spent, budget, takeaway, fridge, today: todayMeals, last_shop: lastShop, period } = home;
   if (period) S.period = period;
   S.takeawayWeekly = takeaway.weekly;
   S.spent = spent; S.budget = budget; updatePill();
+  S.diary = d;
   const left = budget - spent;
   const days = S.period && S.period.days_left ? S.period.days_left : null;
-  const name = (S.user.display_name || '').split(' ')[0];
-  const hour = new Date().getHours();
+  const shift = (n) => { const x = parseIso(day); x.setDate(x.getDate() + n); return iso(x); };
+  const t = d.totals; const tg = d.targets;
+  const bar = (label, val, target, unit) => `<div class="diary-bar">
+      <div class="row between"><span>${label}</span><span class="num"><b>${fmtQty(Math.round(val))}</b>${target ? ` of ${fmtQty(target)}` : ''} ${unit}</span></div>
+      ${target ? `<div class="meter ${val > target * 1.1 ? 'warn' : ''}"><div class="fill w${Math.min(10, Math.round((val / target) * 10))}"></div></div>` : ''}
+    </div>`;
+  const label = (e) => (e.qty_unit === 'portion' ? `${fmtQty(e.qty)} portion${e.qty === 1 ? '' : 's'}` : e.qty !== null && e.qty_unit ? ingLabel(e) : '');
+  const slots = ['breakfast', 'lunch', 'dinner', 'snack'].map((sl) => [sl, d.entries.filter((e) => e.slot === sl)]).filter(([, es]) => es.length);
   view.innerHTML = `
-    <div class="today-head">
-      <div><div class="small muted">${esc(new Date().toLocaleDateString('en-ZA', { weekday: 'long', day: 'numeric', month: 'long' }))}</div>
-        <h2 class="greet">${hour < 12 ? 'Morning' : hour < 17 ? 'Afternoon' : 'Evening'}${name ? `, ${esc(name)}` : ''}</h2></div>
+    <div class="row day-nav">
+      <button class="btn small" data-day="${shift(-1)}" aria-label="Day before">‹</button>
+      <div class="grow center"><b>${isToday ? 'Today' : esc(parseIso(day).toLocaleDateString('en-ZA', { weekday: 'long', day: 'numeric', month: 'short' }))}</b>${isToday ? `<div class="small muted">${esc(new Date().toLocaleDateString('en-ZA', { weekday: 'long', day: 'numeric', month: 'long' }))}</div>` : ''}</div>
+      <button class="btn small" data-day="${shift(1)}" aria-label="Day after" ${isToday ? 'disabled' : ''}>›</button>
     </div>
+    <section class="card stack">
+      ${bar('Energy', t.energy_kj, tg.energy_kj, 'kJ')}
+      ${bar('Protein', t.protein_g, tg.protein_g, 'g')}
+      <div class="small muted">Carbs ${fmtQty(Math.round(t.carbs_g))} g · fat ${fmtQty(Math.round(t.fat_g))} g · sugar ${fmtQty(Math.round(t.sugar_g))} g${d.unknown ? ` · <span class="warn-text">${d.unknown} without nutrition</span>` : ''}</div>
+      ${!tg.energy_kj && !tg.protein_g ? '<a class="small" href="#me">Set your daily targets under Me ›</a>' : ''}
+      <button class="btn primary block" data-act="ate">＋ I ate…</button>
+    </section>
+    ${slots.length ? `<section class="card flush diary">${slots.map(([sl, es]) => `<div class="aisle cap">${sl}</div><ul class="list">${es.map((e) => `<li data-entry="${e.id}">
+        <div class="grow"><div class="name">${esc(e.name)}${e.kind === 'takeaway' ? ' <span class="tag warn">takeaway</span>' : ''}</div>
+          <div class="sub">${[label(e), e.energy_kj !== null ? `${fmtQty(Math.round(e.energy_kj))} kJ` : '', e.protein_g !== null ? `${fmtQty(Math.round(e.protein_g))} g protein` : '', e.energy_kj === null && e.protein_g === null ? '<span class="muted">nutrition unknown</span>' : '', e.cost ? money(e.cost) : ''].filter(Boolean).join(' · ')}</div></div>
+        <button class="icon-btn" data-del-entry="${e.id}" aria-label="Remove ${esc(e.name)}">✕</button></li>`).join('')}</ul>`).join('')}</section>`
+      : `<p class="empty">${isToday ? 'Nothing logged yet today. Tick a planned meal below, or tap “I ate…”.' : 'Nothing logged on this day.'}</p>`}
+    ${isToday ? `${todayHtml(todayMeals, fridge)}
     ${homeCardsHtml(fridge, takeaway, lastShop)}
-    ${todayHtml(todayMeals, fridge) || `<section class="card stack"><h2>Nothing planned today</h2><p class="small muted">Plan your week and today's meals show up here to tick off.</p><a class="btn" href="#plan">Plan my week</a></section>`}
     ${budget > 0 ? `<a class="card money-line" href="#money"><span class="grow"><span class="small muted">Groceries left${days ? ` · ${days} day${days === 1 ? '' : 's'} to payday` : ''}</span><b class="num ${left < 0 ? 'bad-text' : ''}">${money0(left)}</b></span><span aria-hidden="true">›</span></a>`
-      : `<a class="banner" href="#me"><b>Set your monthly grocery budget</b><span class="small">Tap your initial at the top → Money.</span></a>`}`;
+      : `<a class="banner" href="#me"><b>Set your monthly grocery budget</b><span class="small">Tap your initial at the top → Money.</span></a>`}` : ''}`;
   view.onclick = async (e) => {
+    const dn = e.target.closest('[data-day]');
+    if (dn) { S.diaryDay = dn.dataset.day; return renderToday(); }
+    if (e.target.closest('[data-act=ate]')) return eatSheet(day);
+    const del = e.target.closest('[data-del-entry]');
+    if (del) {
+      const en = d.entries.find((x) => x.id === Number(del.dataset.delEntry));
+      const undoWhat = en.kind === 'fridge' || en.kind === 'plan' ? ' It goes back in the fridge.' : en.kind === 'takeaway' ? ' The takeaway spend goes too.' : '';
+      if (!confirm(`Remove ${en.name} from the diary?${undoWhat}`)) return;
+      try { await api('diary.delete', { id: en.id }); } catch (er) { fail(er); }
+      return renderToday();
+    }
     const eat = e.target.closest('[data-eat]');
     if (eat) { try { await eatMeal(eat.dataset.eat, eat.dataset.eaten === '1'); } catch (er) { fail(er); } return renderToday(); }
-    const home = e.target.closest('[data-home]');
-    if (home) return home.dataset.home === 'fridge' ? fridgeSheet() : takeawaySheet(() => renderToday());
+    const home2 = e.target.closest('[data-home]');
+    if (home2) return home2.dataset.home === 'fridge' ? fridgeSheet() : takeawaySheet(() => renderToday());
   };
+}
+
+/** "I ate…": recent things, the fridge, any food or recipe, a takeaway, or quick numbers. */
+async function eatSheet(day) {
+  const d = S.diary || { recent: [], slot: 'snack' };
+  let slot = d.slot;
+  let tab = d.recent.length ? 'recent' : 'food';
+  const done = async (msg) => { closeSheet(); toast(msg); renderToday(); };
+  const log = async (data, msg) => {
+    try { await api('diary.add', { date: day, slot, ...data }); await done(msg); } catch (er) { fail(er); }
+  };
+  const draw = async () => {
+    let body = '';
+    if (tab === 'recent') {
+      body = d.recent.length ? `<ul class="list card flush">${d.recent.map((r, i) => `<li><span class="grow"><b>${esc(r.name)}</b><span class="small muted block">${r.qty_unit === 'portion' ? `${fmtQty(Number(r.qty))} portion${Number(r.qty) === 1 ? '' : 's'}` : ingLabel({ qty: Number(r.qty), qty_unit: r.qty_unit })}</span></span><button type="button" class="btn small" data-recent="${i}">Log</button></li>`).join('')}</ul>` : '<p class="muted small">Things you log often show up here for one tap.</p>';
+    } else if (tab === 'fridge') {
+      const { fridge } = await api('fridge.list');
+      body = fridge.length ? `<ul class="list card flush">${fridge.map((f) => `<li><span class="grow"><b>${esc(f.name)}</b><span class="small muted block">${fmtQty(f.portions)} portion${f.portions === 1 ? '' : 's'}${f.location === 'freezer' ? ' · frozen' : ''}</span></span><button type="button" class="btn small" data-fridge="${f.id}" data-recipe="${f.recipe_id || ''}" data-name="${esc(f.name)}">Ate 1</button></li>`).join('')}</ul>` : '<p class="muted small">Nothing cooked in the fridge.</p>';
+    } else if (tab === 'food') {
+      body = `<div class="field"><input id="eatFind" placeholder="Search a food or recipe" autocomplete="off" enterkeyhint="search"></div><div id="eatResults" class="stack tight"></div>`;
+    } else if (tab === 'takeaway') {
+      body = `<form class="stack" id="eatTa">
+        <label>What was it? <input name="name" placeholder="e.g. Nando's quarter chicken and chips"></label>
+        <label>Cost (R) <input name="cost" type="number" inputmode="decimal" step="0.01" min="0" required></label>
+        <div class="grid2"><label>Energy (kJ, if you know) <input name="kj" type="number" inputmode="numeric" step="1" min="0"></label><label>Protein (g) <input name="protein" type="number" inputmode="decimal" step="0.1" min="0"></label></div>
+        <button class="btn primary block">Log takeaway</button>
+        <p class="small muted">It counts against your takeaway allowance too.</p></form>`;
+    } else {
+      body = `<form class="stack" id="eatQuick">
+        <label>What was it? <input name="name" required placeholder="e.g. Slice of birthday cake"></label>
+        <div class="grid2"><label>Energy (kJ) <input name="kj" type="number" inputmode="numeric" step="1" min="0"></label><label>Protein (g) <input name="protein" type="number" inputmode="decimal" step="0.1" min="0"></label></div>
+        <button class="btn primary block">Log it</button></form>`;
+    }
+    openSheet(`${sheetHead('I ate…')}
+      <div class="chips" role="group" aria-label="Which meal">${['breakfast', 'lunch', 'dinner', 'snack'].map((sl) => `<button type="button" class="chip cap ${sl === slot ? 'active' : ''}" data-slot="${sl}" aria-pressed="${sl === slot}">${sl}</button>`).join('')}</div>
+      <div class="chips" role="group" aria-label="What kind">${[['recent', 'Recent'], ['fridge', 'Fridge'], ['food', 'Food'], ['takeaway', 'Takeaway'], ['quick', 'Quick']].map(([k, l]) => `<button type="button" class="chip ${k === tab ? 'active' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
+      ${body}`, () => {});
+    sheetBody.onclick = onClick;      // openSheet clears handlers, so put them back on every redraw
+    sheetBody.onsubmit = onSubmit;
+    if (tab === 'food') wireFood();
+  };
+  const pickProduct = (p) => {
+    const units = ingUnitsFor(p);
+    document.getElementById('eatResults').innerHTML = `<div class="card stack"><b>${esc(p.name)}</b><span class="small muted">${esc(p.brand || '')} ${packLabel(p)}${p.energy_kj === null && p.protein_g === null ? ' · no nutrition yet, add it under Kitchen' : ''}</span>
+      <div class="row"><input id="eatQty" class="grow" type="number" inputmode="decimal" step="0.001" min="0" placeholder="${units[0] === 'each' ? '1' : '100'}" aria-label="How much">
+        <select id="eatUnit" aria-label="Unit">${units.map((u) => `<option value="${u}">${ING_LABEL[u] || u}</option>`).join('')}</select></div>
+      <button type="button" class="btn primary block" data-logp="${p.id}">Log ${esc(p.name)}</button></div>`;
+    document.getElementById('eatQty').focus();
+  };
+  const pickRecipe = (r) => {
+    document.getElementById('eatResults').innerHTML = `<div class="card stack"><b>${esc(r.name)}</b>
+      <label>Portions <input id="eatPortions" type="number" inputmode="decimal" step="0.25" min="0.25" value="1"></label>
+      <button type="button" class="btn primary block" data-logr="${r.id}">Log ${esc(r.name)}</button>
+      <span class="small muted">If there are portions in the fridge, they come off.</span></div>`;
+  };
+  const wireFood = () => {
+    const find = document.getElementById('eatFind');
+    const out = document.getElementById('eatResults');
+    let seq = 0;
+    const results = (prods, recs) => {
+      out.innerHTML = [...recs.slice(0, 4).map((r) => `<button type="button" class="pick" data-rec="${r.id}"><span><b>${esc(r.name)}</b> <span class="small muted">recipe</span></span></button>`),
+        ...prods.slice(0, 8).map((p) => `<button type="button" class="pick" data-prod="${p.id}"><span><b>${esc(p.name)}</b> <span class="small muted">${esc(p.brand || '')} ${packLabel(p)}</span></span></button>`)].join('')
+        || '<p class="muted small">Nothing found. Use Quick for anything else.</p>';
+    };
+    find.oninput = () => {
+      const q = find.value.trim().toLowerCase();
+      if (q.length < 2) { out.innerHTML = ''; return; }
+      const words = q.split(/\s+/);
+      const hit = (txt) => words.every((w) => txt.toLowerCase().includes(w));
+      const recs = (S.recipes || []).filter((r) => hit(r.name));
+      const local = S.products.filter((p) => hit(`${p.name} ${p.brand || ''}`));
+      results(local, recs);
+      const mine = ++seq;
+      clearTimeout(find.t);
+      find.t = setTimeout(async () => {
+        try {
+          const { products } = await api('products.search', { q });
+          if (mine !== seq) return;
+          const seen = new Set(local.map((p) => p.id));
+          products.forEach((p) => { if (!S.products.some((x) => x.id === p.id)) S.products.push(p); });
+          results([...local, ...products.filter((p) => !seen.has(p.id))], recs);
+        } catch { /* offline */ }
+      }, 300);
+    };
+    find.focus();
+  };
+  if (!S.recipes) { try { S.recipes = (await api('recipes.list')).recipes; } catch { S.recipes = []; } }
+  if (!S.products.length) { try { await loadProducts(); } catch { /* offline */ } }
+  const onClick = async (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.slot) { slot = b.dataset.slot; sheetBody.querySelectorAll('[data-slot]').forEach((x) => { x.classList.toggle('active', x === b); x.setAttribute('aria-pressed', String(x === b)); }); return; }
+    if (b.dataset.tab) { tab = b.dataset.tab; return draw(); }
+    if (b.dataset.recent !== undefined) {
+      const r = d.recent[Number(b.dataset.recent)];
+      if (r.product_id && r.qty_unit !== 'portion') return log({ kind: 'product', product_id: r.product_id, qty: r.qty, qty_unit: r.qty_unit }, `${r.name} logged`);
+      if (r.recipe_id) return log({ kind: 'recipe', recipe_id: r.recipe_id, portions: Number(r.qty) || 1, from_fridge: true }, `${r.name} logged`);
+      return log({ kind: 'quick', name: r.name }, `${r.name} logged`);
+    }
+    if (b.dataset.fridge) {
+      try {
+        if (b.dataset.recipe) await api('diary.add', { date: day, slot, kind: 'recipe', recipe_id: b.dataset.recipe, portions: 1, from_fridge: true });
+        else { await api('fridge.eat', { id: b.dataset.fridge }); await api('diary.add', { date: day, slot, kind: 'quick', name: b.dataset.name }); }
+        return done(`${b.dataset.name} logged`);
+      } catch (er) { return fail(er); }
+    }
+    if (b.dataset.prod) { const p = S.products.find((x) => x.id === Number(b.dataset.prod)); return p && pickProduct(p); }
+    if (b.dataset.rec) { const r = (S.recipes || []).find((x) => x.id === Number(b.dataset.rec)); return r && pickRecipe(r); }
+    if (b.dataset.logp) {
+      const qty = document.getElementById('eatQty').value;
+      if (!(Number(qty) > 0)) return toast('How much did you have?');
+      const p = S.products.find((x) => x.id === Number(b.dataset.logp));
+      return log({ kind: 'product', product_id: p.id, qty, qty_unit: document.getElementById('eatUnit').value }, `${p.name} logged`);
+    }
+    if (b.dataset.logr) {
+      const r = S.recipes.find((x) => x.id === Number(b.dataset.logr));
+      return log({ kind: 'recipe', recipe_id: r.id, portions: document.getElementById('eatPortions').value || 1, from_fridge: true }, `${r.name} logged`);
+    }
+  };
+  const onSubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    if (f.id === 'eatTa') return log({ kind: 'takeaway', name: f.name.value || 'Takeaway', cost: f.cost.value, energy_kj: f.kj.value || null, protein_g: f.protein.value || null }, 'Takeaway logged');
+    if (f.id === 'eatQuick') return log({ kind: 'quick', name: f.name.value, energy_kj: f.kj.value || null, protein_g: f.protein.value || null }, `${f.name.value} logged`);
+  };
+  await draw();
 }
 
 /* ---------- home: meals ready + takeaways ---------- */
@@ -915,7 +1076,12 @@ function fridgeSheet() {
       const li = a.closest('li');
       const f = li ? fridge.find((x) => x.id === Number(li.dataset.id)) : null;
       try {
-        if (a.dataset.act === 'eat') { draw((await api('fridge.eat', { id: f.id })).fridge); toast('Enjoy'); }
+        if (a.dataset.act === 'eat') {
+          if (f.recipe_id) await api('diary.add', { kind: 'recipe', recipe_id: f.recipe_id, portions: 1, from_fridge: true });
+          else { await api('fridge.eat', { id: f.id }); await api('diary.add', { kind: 'quick', name: f.name }); }
+          draw((await api('fridge.list')).fridge);
+          toast("Enjoy. It's in today's diary");
+        }
         if (a.dataset.act === 'freeze' || a.dataset.act === 'thaw') {
           const to = a.dataset.act === 'freeze' ? 'freezer' : 'fridge';
           let n = f.portions;
@@ -1001,7 +1167,8 @@ function takeawaySheet(onClose = refreshHome) {
       e.preventDefault();
       const f = e.target;
       try {
-        const r = await api('takeaway.add', { total: f.total.value, note: f.note.value, date: f.date.value });
+        await api('diary.add', { kind: 'takeaway', cost: f.total.value, name: f.note.value || 'Takeaway', date: f.date.value });
+        const r = await api('takeaway.get');
         const l = r.takeaway.weekly - r.takeaway.spent;
         toast(l >= 0 ? `Logged. ${money0(l)} left this week` : `Logged. ${money0(-l)} over this week`);
         draw(r.takeaway, fridge);
