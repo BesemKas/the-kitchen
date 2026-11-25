@@ -239,3 +239,12 @@ Everyone shares one product catalogue (names, barcodes, pack sizes, nutrition). 
 - **What you see.** Loaded products (`source = 'off'`) don't fill up your Kitchen. They show there once you use one: on your list, in your pantry, priced at your shop, in a household recipe, or in your diary.
 - **Search reaches everything.** Searching in Kitchen, the shopping list's add box and the recipe editor also asks the server, so the whole catalogue is two letters away.
 - Open Food Facts data is ODbL: the credit and licence link sit at the bottom of the Me page; keep them there.
+
+## Prices at the same branch
+
+Prices differ between branches, so they're never shared across them.
+
+- Under *Me → Shopping*, tap **Branch** on a shop and pick the chain and branch (mall or suburb). The app suggests branch names other people already use, so everyone lands on the same one.
+- Where you haven't priced something yourself, you see the newest price someone else at that branch paid in the last 60 days, marked ≈. Your own prices always win, and a shared price is never saved as yours.
+- No names travel with a shared price.
+- **Share prices at the same branch** (on by default) turns it off. Off means you don't share and don't see others' prices either.
