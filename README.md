@@ -188,3 +188,10 @@ Many South African products aren't in Open Food Facts yet. When someone saves a 
 - Products are sent a few at a time in the background and retried with a growing wait if Open Food Facts is down. The admin page shows how many were added.
 
 To switch it on, make one account for the app at openfoodfacts.org and add `off_user`, `off_password` and `off_contact` to `app/config.php` (see `config.sample.php`). Try the test server first (`off_base` = `https://world.openfoodfacts.net`, `off_basic_auth` = `off:off`, with an account made on the test server). Without these settings the feature stays hidden.
+
+## Pilot numbers and feedback
+
+- **Budget → Pilot numbers** (admins): people, new this week, households, the web app's exit criteria, and a table of the last 8 weeks. Each week shows active people, shops logged, takeaway spend per active person, and how many new barcodes Open Food Facts didn't have. Below the table is everything people have said.
+- **Check-ins:** a week after someone joins, and again at four weeks, the app asks three questions once: what they used most, what annoyed them, what's missing. "Not now" doesn't ask that one again.
+- **Tell us what to fix or add** (Budget → Settings): free-text feedback any time.
+- What's logged: the days each person opened the app, and the result of each barcode scan (known, found on Open Food Facts, missing, in-store label). Never which product.

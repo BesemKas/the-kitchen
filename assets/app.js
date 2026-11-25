@@ -2817,11 +2817,12 @@ async function renderBudget() {
       <div class="stack tight"><span class="small muted">Household</span>
         <button class="btn block" data-act="household">${S.household ? `${esc(S.household.name)} · ${S.household.mode === 'shared' ? 'shared kitchen' : 'separate kitchens'} · ${S.household.members.length} ${S.household.members.length === 1 ? 'person' : 'people'}` : 'Start a household or invite someone'}</button>
       </div>
+      <button class="btn block" data-act="feedback">Tell us what to fix or add</button>
       <div class="stack tight"><span class="small muted">Your data</span>
         <div class="row"><button class="btn small grow" data-act="rename">Change my name</button><button class="btn small grow" data-act="export">Download my data</button></div>
         <div class="row"><a class="btn small grow" href="./?privacy">How your data is kept</a><button class="btn small grow danger" data-act="delete-account">Delete my account</button></div>
       </div>
-      ${S.isAdmin ? '<button class="btn block" data-act="admin">People using the app</button>' : ''}
+      ${S.isAdmin ? '<div class="row"><button class="btn grow" data-act="admin">People using the app</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div>' : ''}
       <p class="small muted" id="dispCheck"></p>
     </section>`;
   document.getElementById('bMeter').style.width = `${Math.min(100, b.budget > 0 ? (b.spent / b.budget) * 100 : 100)}%`;
@@ -2886,6 +2887,8 @@ async function renderBudget() {
         return;
       }
       if (t.dataset.act === 'household') return householdSheet();
+      if (t.dataset.act === 'feedback') return feedbackSheet();
+      if (t.dataset.act === 'pilot') return pilotSheet();
       if (t.dataset.act === 'off-share') {
         const r = await api('off.consent', { share: S.offShare !== '1' });
         S.offShare = r.off_share;
@@ -3037,6 +3040,70 @@ async function adminSheet() {
   draw(r.users.map((x) => ({ ...x, id: Number(x.id) })), r.signups_open);
 }
 
+/* ---------- feedback and pilot numbers ---------- */
+function feedbackSheet() {
+  openSheet(`${sheetHead('Tell us what to fix or add')}
+    <form class="stack" id="fbForm">
+      <label>What's on your mind? <textarea name="note" rows="5" maxlength="2000" required placeholder="Something annoying, broken, missing, or something you love"></textarea></label>
+      <button class="btn primary block">Send</button>
+      <p class="small muted">It goes to the person who runs the app, with your name.</p>
+    </form>`);
+  sheetBody.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('feedback.send', { kind: 'note', note: e.target.note.value.trim() }); closeSheet(); toast('Thank you, sent'); } catch (er) { fail(er); }
+  };
+}
+
+/** A week (and four weeks) after joining: three quick questions, asked once. */
+function checkinSheet(kind) {
+  let answered = false;
+  openSheet(`${sheetHead(kind === 'week4' ? 'A month in: how is it going?' : 'One week in: how is it going?')}
+    <form class="stack" id="ciForm">
+      <label>What did you use the most? <textarea name="used" rows="2" maxlength="2000"></textarea></label>
+      <label>What annoyed you or got in the way? <textarea name="annoyed" rows="2" maxlength="2000"></textarea></label>
+      <label>What's missing? <textarea name="missing" rows="2" maxlength="2000"></textarea></label>
+      <button class="btn primary block">Send</button>
+      <button type="button" class="btn block" data-act="skip">Not now</button>
+      <p class="small muted">Answer one or all three. It goes to the person who runs the app, with your name.</p>
+    </form>`, async () => { if (!answered) { S.checkin = null; try { await api('feedback.skip', { kind }); } catch { /* ask again next time */ } } });
+  sheetBody.onclick = (e) => { if (e.target.closest('[data-act=skip]')) closeSheet(); };
+  sheetBody.onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      await api('feedback.send', { kind, used: f.used.value.trim(), annoyed: f.annoyed.value.trim(), missing: f.missing.value.trim() });
+      answered = true; S.checkin = null;
+      closeSheet(); toast('Thank you, that really helps');
+    } catch (er) { fail(er); }
+  };
+}
+
+/** Admin: the numbers behind the lab's exit criteria. */
+async function pilotSheet() {
+  let r;
+  try { r = await api('admin.pilot'); } catch (er) { return fail(er); }
+  const wk = (d) => new Date(`${d}T00:00`).toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' });
+  const max = Math.max(1, ...r.weeks.map((w) => w.active));
+  openSheet(`${sheetHead('Pilot numbers')}
+    <div class="grid3 right">
+      <div><div class="small muted">People</div><b class="num">${r.people}</b></div>
+      <div><div class="small muted">New this week</div><b class="num">${r.joined_this_week}</b></div>
+      <div><div class="small muted">Households</div><b class="num">${r.households}</b><div class="small muted">${r.shared_kitchens} shared</div></div>
+    </div>
+    <div class="stack tight"><span class="small muted">Exit criteria for the web app</span>
+      <ul class="list card flush">${r.exit.map((x) => `<li><span class="grow"><b>${esc(x.label)}</b><span class="small muted block">${esc(x.bar)} · now: ${esc(x.value)}</span></span><span class="tag ${x.met ? '' : 'warn'}">${x.met ? 'met' : 'not yet'}</span></li>`).join('')}</ul>
+    </div>
+    <div class="stack tight"><span class="small muted">The last 8 weeks (week starting)</span>
+      <table class="pilot-table"><thead><tr><th>Week</th><th>Active</th><th>Shops</th><th>Takeaways /person</th><th>Not on OFF</th></tr></thead>
+      <tbody>${r.weeks.map((w) => `<tr><td>${wk(w.week)}</td><td><span class="bar-cell"><i class="pbar w${Math.round((w.active / max) * 10)}"></i>${w.active}</span></td><td>${w.shops}</td><td>${money(w.takeaway_per_person)}</td><td>${w.off_asked ? `${w.off_missing} of ${w.off_asked}` : '–'}</td></tr>`).join('')}</tbody></table>
+      <p class="small muted">"Not on OFF": new barcodes scanned that Open Food Facts didn't have. Label reads this month: ${r.label_reads_month}. Recipes: ${r.recipes}.</p>
+    </div>
+    <div class="stack tight"><span class="small muted">What people said</span>
+      ${r.feedback.length ? `<ul class="list card flush">${r.feedback.map((f) => `<li class="fb-item"><span class="small muted">${esc(f.who || 'Someone')} · ${esc(String(f.created_at).slice(0, 10))}${f.kind !== 'note' ? ` · ${f.kind === 'week1' ? 'week 1' : 'week 4'} check-in` : ''}</span>
+        ${f.used ? `<span><b>Used:</b> ${esc(f.used)}</span>` : ''}${f.annoyed ? `<span><b>Annoyed:</b> ${esc(f.annoyed)}</span>` : ''}${f.missing ? `<span><b>Missing:</b> ${esc(f.missing)}</span>` : ''}${f.note ? `<span>${esc(f.note)}</span>` : ''}</li>`).join('')}</ul>` : '<p class="small muted">Nothing yet. The week-1 check-in asks everyone automatically.</p>'}
+    </div>`);
+}
+
 /* ---------- households ---------- */
 const unsynced = () => (queue.length ? `${queue.length} change${queue.length === 1 ? " hasn't" : "s haven't"} synced yet. Wait for signal so they sync first.` : '');
 
@@ -3161,7 +3228,7 @@ async function joinSheet(token, isNew) {
   try {
     const b = await api('bootstrap');
     Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader,
-      alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday, isAdmin: !!b.is_admin, signupsOpen: !!b.signups_open, household: b.household || null, offReady: !!b.off_ready, offShare: b.off_share || '' });
+      alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday, isAdmin: !!b.is_admin, signupsOpen: !!b.signups_open, household: b.household || null, offReady: !!b.off_ready, offShare: b.off_share || '', checkin: b.checkin || null });
     const saved = store.get('store', null);
     S.storeId = S.stores.some((s) => String(s.id) === String(saved)) ? String(saved) : (S.stores[0] ? String(S.stores[0].id) : null);
     store.set('budgetDate', null);
@@ -3173,6 +3240,7 @@ async function joinSheet(token, isNew) {
     const join = location.hash.match(/^#join=([0-9a-f]{48})(&new)?$/);
     if (join) { history.replaceState(null, '', '#list'); route(); joinSheet(join[1], !!join[2]); return; }
     route();
+    if (S.checkin) setTimeout(() => { if (sheet.hidden) checkinSheet(S.checkin); }, 2500);
   } catch (e) {
     view.innerHTML = `<p class="error">${esc(e.message)}</p>`;
   }

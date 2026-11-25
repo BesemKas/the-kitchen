@@ -733,11 +733,13 @@ function off_lookup(string $barcode): ?array
     $body = curl_exec($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
-    if (!$body || $code !== 200) {
+    $data = $body ? json_decode($body, true) : null;
+    // remembered for the pilot numbers: found, missing (they don't have it) or error (couldn't ask)
+    $GLOBALS['off_last'] = is_array($data) && ($code === 200 || $code === 404) ? ((int)($data['status'] ?? 0) === 1 ? 'found' : 'missing') : 'error';
+    if ($code !== 200 || !is_array($data)) {
         return null;
     }
-    $data = json_decode($body, true);
-    return is_array($data) ? off_parse($data) : null;
+    return off_parse($data);
 }
 
 /* ----- giving back to Open Food Facts ----- */
@@ -890,6 +892,28 @@ function off_contribute(int $productId, ?int $userId): string
     return 'sent';
 }
 
+/** One line in the pilot numbers; never allowed to break the request. */
+function log_scan(int $uid, string $kind, string $result): void
+{
+    try {
+        q('INSERT INTO scan_log (user_id, kind, result) VALUES (?, ?, ?)', [$uid, $kind, $result]);
+    } catch (Throwable $e) {
+        // pilot numbers are nice to have
+    }
+}
+
+/** Which check-in to show: a week after joining, then four weeks after. */
+function checkin_due(array $user): ?string
+{
+    $age = (time() - strtotime((string)q('SELECT created_at FROM users WHERE id = ?', [(int)$user['id']])->fetchColumn())) / 86400;
+    foreach (['week4' => 28, 'week1' => 7] as $k => $days) {
+        if ($age >= $days && user_setting('checkin_' . $k, '') === '') {
+            return $k;
+        }
+    }
+    return null;
+}
+
 /** Queue a product for sharing, if the person said yes and it has a real barcode. */
 function off_queue(int $productId, int $userId): bool
 {
@@ -1008,6 +1032,7 @@ try {
         case 'bootstrap':
             $month = date('Y-m');
             q('UPDATE users SET last_seen = NOW() WHERE id = ?', [$uid]);
+            q('INSERT IGNORE INTO user_days (user_id, day) VALUES (?, CURDATE())', [$uid]);
             if (!q('SELECT 1 FROM stores WHERE user_id = ? LIMIT 1', [$kid])->fetchColumn()) {
                 // a fresh account starts with the usual shops (no prices yet)
                 foreach (DEFAULT_STORES as $n) {
@@ -1035,6 +1060,7 @@ try {
                 'household' => household_view($uid),
                 'off_ready' => off_ready(),
                 'off_share' => user_setting('off_share', ''),
+                'checkin' => checkin_due($user),
                 'month' => $month,
                 'currency' => config('currency', 'R'),
             ]);
@@ -1092,13 +1118,17 @@ try {
             }
             if (strlen($code) === 13 && $code[0] === '2') {
                 // a shop's own label for weighed items (meat, deli): it encodes a price or weight, not a product
+                log_scan($uid, 'barcode', 'instore');
                 out(['product' => null, 'suggestion' => null, 'barcode' => $code, 'instore' => true]);
             }
             $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.barcode = ?', [$kid, $code])->fetch();
             if ($row) {
+                log_scan($uid, 'barcode', 'known');
                 out(['product' => product_row($row, latest_prices([(int)$row['id']])), 'suggestion' => null]);
             }
-            out(['product' => null, 'suggestion' => off_lookup($code), 'barcode' => $code]);
+            $suggestion = off_lookup($code);
+            log_scan($uid, 'barcode', $GLOBALS['off_last'] ?? 'error');
+            out(['product' => null, 'suggestion' => $suggestion, 'barcode' => $code]);
 
         case 'products.off':
             // fetch Open Food Facts data for an existing product's barcode (e.g. to fill in nutrition later)
@@ -1145,7 +1175,9 @@ try {
             if ($data === '' || strlen($data) > 1400000) {
                 fail('Photo too large or missing');
             }
-            out(read_label($data, $mime));
+            $read = read_label($data, $mime);
+            log_scan($uid, 'label', 'read');
+            out($read);
 
         case 'products.save':
             $id = int_in($in, 'id', false);
@@ -1778,6 +1810,7 @@ try {
                 'ingredient_alerts' => $mine('SELECT code, mode FROM ingredient_alerts WHERE user_id = ?'),
                 'my_recipes' => array_values(array_filter(recipes_with_costs(), fn($r) => $r['mine'])),
                 'household' => household_view($uid),
+                'feedback_you_sent' => $mine('SELECT kind, used, annoyed, missing, note, created_at FROM feedback WHERE user_id = ?'),
                 'products_you_shared_with_open_food_facts' => $mine('SELECT p.barcode, p.name, c.status, c.updated_at FROM off_contributions c JOIN products p ON p.id = c.product_id WHERE c.user_id = ?'),
                 'shops_you_logged_for_your_household' => $mine('SELECT trip_date, kind, total, estimate, note FROM trips WHERE added_by = ? AND user_id <> added_by'),
             ]]);
@@ -1842,6 +1875,72 @@ try {
                 db()->query("SELECT RELEASE_LOCK('kitchen_off')");
             }
             out(['done' => $done]);
+
+        // ----- feedback -----
+        case 'feedback.send':
+            $kind = in_array($in['kind'] ?? '', ['note', 'week1', 'week4'], true) ? $in['kind'] : 'note';
+            $f = [];
+            foreach (['used', 'annoyed', 'missing', 'note'] as $k) {
+                $f[$k] = str_in($in, $k, 2000);
+            }
+            array_filter($f) || fail('Write something first');
+            rate_ok('feedback:' . $uid, 20, 86400) || fail('That is a lot of feedback for one day. Thank you! Try again tomorrow.', 429);
+            q('INSERT INTO feedback (user_id, kind, used, annoyed, missing, note) VALUES (?, ?, ?, ?, ?, ?)', [$uid, $kind, $f['used'], $f['annoyed'], $f['missing'], $f['note']]);
+            if ($kind !== 'note') {
+                set_user_setting('checkin_' . $kind, 'done');
+            }
+            out(['ok' => true]);
+
+        case 'feedback.skip':
+            $kind = in_array($in['kind'] ?? '', ['week1', 'week4'], true) ? $in['kind'] : fail('Unknown check-in');
+            set_user_setting('checkin_' . $kind, 'skipped');
+            if ($kind === 'week4') {
+                set_user_setting('checkin_week1', user_setting('checkin_week1', '') ?: 'skipped');   // don't ask the older one afterwards
+            }
+            out(['ok' => true]);
+
+        case 'admin.pilot':
+            // the numbers behind the lab's exit criteria
+            empty($user['is_admin']) && fail('Admins only', 403);
+            $monday = new DateTimeImmutable('monday this week');
+            $weeks = [];
+            for ($i = 7; $i >= 0; $i--) {
+                $start = $monday->modify("-$i weeks");
+                [$from, $to] = [$start->format('Y-m-d'), $start->modify('+1 week')->format('Y-m-d')];
+                $active = (int)q('SELECT COUNT(DISTINCT d.user_id) FROM user_days d JOIN users u ON u.id = d.user_id WHERE u.is_kitchen = 0 AND d.day >= ? AND d.day < ?', [$from, $to])->fetchColumn();
+                $take = (float)q("SELECT COALESCE(SUM(total), 0) FROM trips WHERE kind = 'eating_out' AND trip_date >= ? AND trip_date < ?", [$from, $to])->fetchColumn();
+                $scan = q("SELECT result, COUNT(*) n FROM scan_log WHERE kind = 'barcode' AND at >= ? AND at < ? GROUP BY result", [$from, $to])->fetchAll(PDO::FETCH_KEY_PAIR);
+                $weeks[] = [
+                    'week' => $from,
+                    'active' => $active,
+                    'shops' => (int)q("SELECT COUNT(*) FROM trips WHERE kind = 'groceries' AND trip_date >= ? AND trip_date < ?", [$from, $to])->fetchColumn(),
+                    'takeaway_per_person' => $active ? round($take / $active, 2) : 0,
+                    'scans' => array_sum(array_map('intval', $scan)),
+                    'off_missing' => (int)($scan['missing'] ?? 0),
+                    'off_asked' => (int)($scan['missing'] ?? 0) + (int)($scan['found'] ?? 0),
+                ];
+            }
+            $eightAgo = $monday->modify('-7 weeks')->format('Y-m-d');
+            $people = (int)q('SELECT COUNT(*) FROM users WHERE is_kitchen = 0 AND disabled = 0')->fetchColumn();
+            // people seen in every one of the last 8 weeks (this week included)
+            $steady = (int)q("SELECT COUNT(*) FROM (SELECT d.user_id FROM user_days d JOIN users u ON u.id = d.user_id WHERE u.is_kitchen = 0 AND d.day >= ?
+                              GROUP BY d.user_id HAVING COUNT(DISTINCT YEARWEEK(d.day, 1)) >= 8) x", [$eightAgo])->fetchColumn();
+            [$lastWeek, $thisWeek] = [$weeks[6]['active'], $weeks[7]['active']];
+            out([
+                'weeks' => $weeks,
+                'people' => $people,
+                'joined_this_week' => (int)q('SELECT COUNT(*) FROM users WHERE is_kitchen = 0 AND created_at >= ?', [$monday->format('Y-m-d')])->fetchColumn(),
+                'households' => (int)q('SELECT COUNT(*) FROM households')->fetchColumn(),
+                'shared_kitchens' => (int)q("SELECT COUNT(*) FROM households WHERE mode = 'shared'")->fetchColumn(),
+                'recipes' => (int)q('SELECT COUNT(*) FROM recipes')->fetchColumn(),
+                'label_reads_month' => (int)q("SELECT COUNT(*) FROM scan_log WHERE kind = 'label' AND at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')")->fetchColumn(),
+                'exit' => [
+                    ['label' => 'People keep using it', 'bar' => 'most active people, every week for 8 weeks', 'value' => "$steady of $lastWeek seen every week for 8 weeks", 'met' => $lastWeek > 0 && $steady * 2 > $lastWeek],
+                    ['label' => 'It spreads past friends', 'bar' => '20 or more weekly users', 'value' => "$lastWeek last full week, $thisWeek so far this week", 'met' => $lastWeek >= 20],
+                    ['label' => 'Someone pays', 'bar' => '5 people paying', 'value' => 'not measured yet', 'met' => false],
+                ],
+                'feedback' => q('SELECT f.kind, f.used, f.annoyed, f.missing, f.note, f.created_at, u.display_name who FROM feedback f LEFT JOIN users u ON u.id = f.user_id ORDER BY f.id DESC LIMIT 30')->fetchAll(),
+            ]);
 
         // ----- households -----
         case 'household.get':
