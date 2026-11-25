@@ -148,7 +148,7 @@ if ($user && $page !== 'privacy') {
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
-<link rel="stylesheet" href="assets/app.css?v=19">
+<link rel="stylesheet" href="assets/app.css?v=20">
 </head>
 <?php if (!$user || $page === 'privacy'): ?>
 <body class="auth">
@@ -163,8 +163,8 @@ if ($user && $page !== 'privacy') {
     <p><b>Who sees it:</b> only you, unless you join a household. In a household everyone sees each other's recipes and the people's names; if the household shares its kitchen, the shopping list, pantry, shops and prices, meal plan, fridge and grocery budget are shared too (your takeaways, ingredient alerts and targets stay yours). Product facts (names, barcodes, nutrition, label photos) are shared with everyone so a scan helps all users. Recipes are private unless you tap “Share with everyone”.</p>
     <p><b>Where it lives:</b> on the app's web host in a MySQL database, with nightly backups. It is never sold or shared. Barcodes are looked up on Open Food Facts; if label reading is switched on, label photos are sent to Anthropic's Claude to read the numbers.</p>
     <p><b>Pilot numbers:</b> to see whether the app is working, it notes which days you open it, whether each barcode you scan was already known (not which product), and the feedback you send. The person who runs the app sees these as totals per week, plus your feedback with your name.</p>
-    <p><b>Open Food Facts:</b> only if you say yes, products you add (name, brand, pack size, ingredients, nutrition and label photos) are added to Open Food Facts, a free public food database. Once there they are public under open licences (ODbL for the data, CC BY-SA for photos). Your name, prices, lists, plans and budget are never sent. You can switch this off under Budget → Settings.</p>
-    <p><b>Your rights:</b> under Budget → Settings you can download everything the app holds about you, or delete your account and all your data.</p>
+    <p><b>Open Food Facts:</b> only if you say yes, products you add (name, brand, pack size, ingredients, nutrition and label photos) are added to Open Food Facts, a free public food database. Once there they are public under open licences (ODbL for the data, CC BY-SA for photos). Your name, prices, lists, plans and budget are never sent. You can switch this off under Me.</p>
+    <p><b>Your rights:</b> under Me (your initial at the top) you can download everything the app holds about you, or delete your account and all your data.</p>
   </div>
   <a class="btn" href="./">Back</a>
 <?php elseif ($page === 'signup'): ?>
@@ -211,22 +211,23 @@ if ($user && $page !== 'privacy') {
 <?php else: ?>
 <body>
 <header class="topbar">
-  <h1 id="title">List</h1>
+  <h1 id="title">Today</h1>
   <button id="budgetPill" class="pill" type="button"></button>
+  <button id="meBtn" class="me-btn" type="button" aria-label="Me: profile and settings"><?= h(mb_strtoupper(mb_substr(trim((string)($user['display_name'] ?? '')) ?: (string)($user['username'] ?? '?'), 0, 1))) ?></button>
 </header>
 <div id="netbar" class="netbar" role="status" aria-live="polite" hidden></div>
 <main id="view" class="view"></main>
 <nav class="tabs" aria-label="Main">
-  <a href="#list" data-tab="list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.7a2 2 0 0 0 2-1.5L21 8H6.2"/><circle cx="10" cy="20" r="1.3"/><circle cx="17" cy="20" r="1.3"/></svg>List</a>
-  <a href="#products" data-tab="products"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="8.5" r="1.5"/></svg>Products</a>
+  <a href="#today" data-tab="today"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Today</a>
+  <a href="#shop" data-tab="shop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.7a2 2 0 0 0 2-1.5L21 8H6.2"/><circle cx="10" cy="20" r="1.3"/><circle cx="17" cy="20" r="1.3"/></svg>Shop</a>
   <a href="#plan" data-tab="plan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>Plan</a>
-  <a href="#recipes" data-tab="recipes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11h16v3a6 6 0 0 1-6 6h-4a6 6 0 0 1-6-6z"/><path d="M2 11h20M9 7c0-1.5 1-2 1-3M14 7c0-1.5 1-2 1-3"/></svg>Recipes</a>
-  <a href="#budget" data-tab="budget"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="14" rx="2"/><path d="M3 10h18M16 15h2"/></svg>Budget</a>
+  <a href="#kitchen" data-tab="kitchen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M5 10h14M9 6v2M9 13v3"/></svg>Kitchen</a>
+  <a href="#money" data-tab="money"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="14" rx="2"/><path d="M3 10h18M16 15h2"/></svg>Money</a>
 </nav>
 <div id="sheet" class="sheet" hidden><div class="sheet-body" id="sheetBody"></div></div>
 <div id="toast" class="toast" hidden></div>
 <script src="assets/zxing-browser.min.js"></script>
-<script src="assets/app.js?v=19"></script>
+<script src="assets/app.js?v=20"></script>
 </body>
 <?php endif; ?>
 </html>
