@@ -3264,6 +3264,7 @@ async function renderBudget(mode = 'money') {
     </section>
     ${S.isAdmin ? '<section class="card stack"><h2>Running the app</h2><div class="row"><button class="btn grow" data-act="admin">People</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div><button class="btn block" data-act="off-import">Load South African products from Open Food Facts</button><p class="small muted" id="importStatus">Adds their South African products to the shared catalogue, 100 at a time. Keep this screen open; it takes a while.</p></section>' : ''}
     <p class="small muted" id="dispCheck"></p>
+    <p class="small muted">Product names and nutrition partly come from <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a>, shared under the <a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">Open Database Licence</a>.</p>
 ` : `
     <div class="row">
       <button class="btn small" data-day="${dayShift(per.start, -1)}" aria-label="Previous pay month">‹</button>
