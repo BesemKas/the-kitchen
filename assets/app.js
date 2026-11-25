@@ -3262,7 +3262,7 @@ async function renderBudget(mode = 'money') {
       <div class="row"><button class="btn small grow" data-act="export">Download my data</button><a class="btn small grow" href="./?privacy">How your data is kept</a></div>
       <button class="btn small danger block" data-act="delete-account">Delete my account</button>
     </section>
-    ${S.isAdmin ? '<section class="card stack"><h2>Running the app</h2><div class="row"><button class="btn grow" data-act="admin">People</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div><button class="btn block" data-act="off-import">Load South African products from Open Food Facts</button><p class="small muted" id="importStatus">Adds their South African products to the shared catalogue, 100 at a time. Keep this screen open; it takes a while.</p></section>' : ''}
+    ${S.isAdmin ? '<section class="card stack"><h2>Running the app</h2><div class="row"><button class="btn grow" data-act="admin">People</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div><button class="btn block" data-act="off-import">Load South African products</button><p class="small muted" id="importStatus">From Open Food Facts into the shared catalogue, 100 at a time. Keep this screen open; it takes a while.</p></section>' : ''}
     <p class="small muted" id="dispCheck"></p>
     <p class="small muted">Product names and nutrition partly come from <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a>, shared under the <a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">Open Database Licence</a>.</p>
 ` : `

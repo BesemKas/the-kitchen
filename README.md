@@ -235,7 +235,7 @@ Exact grams at home drift from the first snack, so the app shows a rough state i
 
 Everyone shares one product catalogue (names, barcodes, pack sizes, nutrition). Prices stay with each person's own shops.
 
-- **Loading South African products.** An admin can tap *Me → Running the app → Load South African products from Open Food Facts*. It pulls their South African products, 100 at a time, one page every 7 seconds (inside their limit of 10 searches a minute). Keep the screen open; leave it and it pauses, and the next tap carries on from the same page. Products that already exist only get missing details filled in.
+- **Loading South African products.** An admin can tap *Me → Running the app → Load South African products*. It pulls their South African products, 100 at a time, one page every 7 seconds (inside their limit of 10 searches a minute). Keep the screen open; leave it and it pauses, and the next tap carries on from the same page. Products that already exist only get missing details filled in.
 - **What you see.** Loaded products (`source = 'off'`) don't fill up your Kitchen. They show there once you use one: on your list, in your pantry, priced at your shop, in a household recipe, or in your diary.
 - **Search reaches everything.** Searching in Kitchen, the shopping list's add box and the recipe editor also asks the server, so the whole catalogue is two letters away.
 - Open Food Facts data is ODbL: the credit and licence link sit at the bottom of the Me page; keep them there.
