@@ -1228,7 +1228,16 @@ try {
         // ----- products -----
         case 'products.list':
             $prices = latest_prices();
-            $rows = array_map(fn($r) => product_row($r, $prices), q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? ORDER BY p.name', [$kid])->fetchAll());
+            // your products: everything people added, plus loaded catalogue products you've actually used
+            $people = implode(',', array_map('intval', household_people($uid) ?: [$uid]));
+            $rows = array_map(fn($r) => product_row($r, $prices), q("SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p
+                LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ?
+                WHERE p.source <> 'off' OR pa.product_id IS NOT NULL
+                   OR p.id IN (SELECT pr.product_id FROM prices pr JOIN stores s ON s.id = pr.store_id AND s.user_id = ?)
+                   OR p.id IN (SELECT product_id FROM list_items WHERE user_id = ? AND product_id IS NOT NULL)
+                   OR p.id IN (SELECT ri.product_id FROM recipe_items ri JOIN recipes r ON r.id = ri.recipe_id WHERE r.user_id IN ($people))
+                   OR p.id IN (SELECT product_id FROM food_log WHERE user_id = ? AND product_id IS NOT NULL)
+                ORDER BY p.name", [$kid, $kid, $kid, $uid])->fetchAll());
             $photos = [];
             foreach (q('SELECT id, product_id, kind FROM product_photos ORDER BY id DESC') as $ph) {
                 $photos[(int)$ph['product_id']][] = ['id' => (int)$ph['id'], 'kind' => $ph['kind']];
@@ -2259,6 +2268,45 @@ try {
             leave_household($uid);
             db()->commit();
             out(['household' => null]);
+
+        case 'admin.off_import':
+            // load one page (100) of South African products from Open Food Facts into the shared catalogue;
+            // the app calls this every 7 seconds, inside their limit of 10 searches a minute
+            empty($user['is_admin']) && fail('Admins only', 403);
+            function_exists('curl_init') || fail('This server cannot reach Open Food Facts');
+            $page = int_in($in, 'page', false) ?: (int)setting('off_import_page', '1');
+            $fields = 'code,product_name,brands,quantity,product_quantity,product_quantity_unit,nutriments,nutriscore_grade,nova_group,additives_tags,ingredients_text_en,ingredients_text';
+            [$code, $body] = off_http("/api/v2/search?countries_tags=en:south-africa&fields=$fields&page_size=100&page=$page&sort_by=unique_scans_n");
+            $d = json_decode($body, true);
+            ($code === 200 && is_array($d)) || fail("Open Food Facts didn't answer (HTTP $code). Try again in a minute.", 502);
+            $added = $updated = 0;
+            foreach ((array)($d['products'] ?? []) as $op) {
+                $bc = preg_replace('/\D/', '', (string)($op['code'] ?? ''));
+                if (!shareable_barcode($bc)) {
+                    continue;
+                }
+                $s = off_parse(['status' => 1, 'product' => $op]);
+                if (!$s || !$s['name']) {
+                    continue;
+                }
+                $id = q('SELECT id FROM products WHERE barcode = ?', [$bc])->fetchColumn();
+                if ($id) {
+                    apply_off((int)$id, $s);   // fills only what's missing
+                    $updated++;
+                    continue;
+                }
+                $cols = ['barcode' => $bc, 'name' => mb_substr($s['name'], 0, 120), 'brand' => $s['brand'] ? mb_substr($s['brand'], 0, 80) : null,
+                         'pack_size' => $s['pack_size'], 'unit' => $s['unit'], 'source' => 'off',
+                         'nutriscore' => $s['nutriscore'], 'nova' => $s['nova'], 'additives' => $s['additives'] ? implode(',', $s['additives']) : null,
+                         'ingredients' => $s['ingredients'] ? mb_substr($s['ingredients'], 0, 4000) : null] + $s['nutrition'];
+                q('INSERT INTO products (' . implode(', ', array_keys($cols)) . ', off_checked_at) VALUES (' . implode(', ', array_fill(0, count($cols), '?')) . ', NOW())', array_values($cols));
+                $added++;
+            }
+            $total = (int)($d['count'] ?? 0);
+            $done = $page * 100 >= $total || empty($d['products']);
+            set_setting('off_import_page', (string)($done ? 1 : $page + 1));
+            out(['page' => $page, 'pages' => max(1, (int)ceil($total / 100)), 'added' => $added, 'updated' => $updated, 'total' => $total, 'done' => $done,
+                 'catalogue' => (int)q('SELECT COUNT(*) FROM products')->fetchColumn()]);
 
         case 'admin.users':
             empty($user['is_admin']) && fail('Admins only', 403);

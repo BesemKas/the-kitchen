@@ -303,6 +303,11 @@ const MIGRATIONS = [
             FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
     ],
+    // South African products loaded from Open Food Facts sit in the shared catalogue but only show in your
+    // Kitchen once you use them; search reaches all of them
+    16 => [
+        "ALTER TABLE products ADD COLUMN source VARCHAR(8) NOT NULL DEFAULT 'user', ADD INDEX (source)",
+    ],
 ];
 
 function schema_version(): int
