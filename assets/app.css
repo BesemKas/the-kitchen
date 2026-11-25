@@ -25,7 +25,8 @@
   --nav-h: 64px;
   --nav-gap: 12px;
   /* sit the dock just above the iPhone home indicator instead of a full safe-area + gap above it */
-  --nav-bottom: max(8px, calc(env(safe-area-inset-bottom) - 14px));
+  --vp-gap: 0px;   /* set by fitDock() on iOS home-screen apps with a phantom bottom band */
+  --nav-bottom: calc(max(8px, calc(env(safe-area-inset-bottom) - 14px)) - var(--vp-gap));
   --display: 'Space Grotesk', 'Inter', system-ui, sans-serif;
   color-scheme: dark;
 }
@@ -378,3 +379,8 @@ a.banner { display: grid; gap: 2px; text-decoration: none; }
 @keyframes ptr-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .ptr.spin svg { animation-duration: 2.5s; } }
 html, body { overscroll-behavior-y: contain; }
+
+/* while typing: no dock, add bar right on top of the keyboard */
+body.typing .tabs { display: none; }
+body.typing .addbar { bottom: 8px; }
+.probe { position: fixed; visibility: hidden; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }

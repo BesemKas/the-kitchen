@@ -365,6 +365,42 @@ async function route(opts) {
   if (keep) window.scrollTo(0, y);
 }
 
+/* ---------- keep the dock on the bottom edge ----------
+ * iOS 26 home-screen apps can leave a band at the bottom as if Safari's toolbar were still there:
+ * the window is shorter than the screen and fixed bars sit above that band. Measure the band and
+ * push the bars down into it. While typing, the dock hides and the add bar sits on the keyboard. */
+const isTyping = () => { const a = document.activeElement; return !!a && (['TEXTAREA', 'SELECT'].includes(a.tagName) || (a.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit'].includes(a.type))); };
+function fitDock() {
+  const typing = isTyping();
+  document.body.classList.toggle('typing', typing);
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  let gap = 0;
+  if (standalone && !typing) {
+    const portrait = window.innerHeight >= window.innerWidth;
+    const screenH = portrait ? Math.max(screen.height, screen.width) : Math.min(screen.height, screen.width);
+    gap = Math.round(screenH - window.innerHeight);
+    if (gap < 2 || gap > 90) gap = 0;   // nothing to fix, or the keyboard/something else is up
+  }
+  document.documentElement.style.setProperty('--vp-gap', `${gap}px`);
+}
+['resize', 'orientationchange', 'pageshow'].forEach((ev) => window.addEventListener(ev, fitDock));
+window.visualViewport?.addEventListener('resize', fitDock);
+document.addEventListener('focusin', fitDock);
+document.addEventListener('focusout', () => setTimeout(fitDock, 50));
+fitDock();
+
+/** One line of numbers for fixing layout on a phone I can't see: window vs screen height and safe areas. */
+function displayCheck() {
+  const probe = document.createElement('div');
+  probe.className = 'probe';
+  document.body.appendChild(probe);
+  const cs = getComputedStyle(probe);
+  const top = parseFloat(cs.paddingTop) || 0; const bottom = parseFloat(cs.paddingBottom) || 0;
+  probe.remove();
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  return `Display check: window ${window.innerHeight}, screen ${screen.height}, visible ${Math.round(window.visualViewport?.height || 0)}, safe top ${top}, bottom ${bottom}, gap ${getComputedStyle(document.documentElement).getPropertyValue('--vp-gap').trim()}${standalone ? ', app' : ', browser'}`;
+}
+
 /* ---------- pull to refresh (the installed app has no reload button) ---------- */
 (() => {
   const ind = document.createElement('div');
@@ -1291,7 +1327,11 @@ function recipeView(r, portions = r.servings) {
       ${time ? `<p class="small muted">${time}</p>` : ''}
       <section class="card stack">
         <div class="row between">
-          <span class="strong">Portions to make</span>
+          <span>Recipe makes <b>${r.servings} portion${r.servings === 1 ? '' : 's'}</b></span>
+          <button type="button" class="btn small" data-act="makes">Change</button>
+        </div>
+        <div class="row between">
+          <span class="strong">Cooking this time</span>
           <div class="qty big"><button type="button" data-act="minus" aria-label="Fewer portions">−</button><span>${fmtQty(n)}</span><button type="button" data-act="plus" aria-label="More portions">+</button></div>
         </div>
         <div class="grid3 right">
@@ -1300,7 +1340,7 @@ function recipeView(r, portions = r.servings) {
           <div><div class="small muted">Packs cost</div><b class="num">${money(sc.toBuy)}</b></div>
         </div>
         ${sc.missing ? `<p class="small warn-text">${sc.missing} ingredient${sc.missing > 1 ? 's have' : ' has'} no price yet, so costs are low.</p>` : ''}
-        ${n !== r.servings ? `<p class="small muted">Scaled from the recipe's ${r.servings} portions.</p>` : ''}
+        ${n !== r.servings ? `<p class="small muted">Amounts scaled from the recipe's ${r.servings} portions.</p>` : ''}
       </section>
 
       <button class="btn primary block" data-act="cook">Start cook mode</button>
@@ -1330,7 +1370,8 @@ function recipeView(r, portions = r.servings) {
         <button class="btn" data-act="list">Add to list</button>
         <button class="btn" data-act="plan">Add to plan</button>
         <button class="btn" data-act="edit">Edit recipe</button>
-      </div>`);
+      </div>
+      <button class="btn block danger" data-act="delete">Delete recipe</button>`);
     sheetBody.scrollTop = keepY;
     const batch = document.getElementById('batchG');
     const per = () => {
@@ -1343,6 +1384,20 @@ function recipeView(r, portions = r.servings) {
       if (!t) return;
       try {
         switch (t.dataset.act) {
+          case 'makes': {
+            const v = await askNumber(`How many portions does ${r.name} make?`, r.servings,
+              { hint: 'The ingredients stay the same; the batch is just split into this many containers. Costs and nutrition per portion update.', step: '1' });
+            if (v === null || v === undefined || v === '' || !(Number(v) >= 1)) return recipeView(r, n);
+            await api('recipes.servings', { id: r.id, servings: Math.round(Number(v)) });
+            const fresh = (await api('recipes.list')).recipes.find((x) => x.id === r.id) || r;
+            toast(`${r.name} now makes ${fresh.servings} portions`);
+            return recipeView(fresh, fresh.servings);
+          }
+          case 'delete':
+            if (!confirm(`Delete ${r.name}? Recipes are shared, so it's deleted for both of you and comes off both meal plans.`)) return;
+            await api('recipes.delete', { id: r.id });
+            closeSheet(); toast(`Deleted ${r.name}`); route();
+            return;
           case 'minus': n = Math.max(1, n - 1); return draw();
           case 'plus': n = Math.min(100, n + 1); return draw();
           case 'cook': closeSheet(); return cookMode(r, n);
@@ -2006,9 +2061,12 @@ async function renderBudget() {
       </div>
       <p class="small muted">Logged in as ${esc(S.user.display_name)}.</p>
       <div class="row"><button class="btn small grow" data-act="password">Change password</button><button class="btn small grow" data-act="logout">Log out</button></div>
+      <p class="small muted" id="dispCheck"></p>
     </section>`;
   document.getElementById('bMeter').style.width = `${Math.min(100, b.budget > 0 ? (b.spent / b.budget) * 100 : 100)}%`;
 
+  const dc = document.getElementById('dispCheck');
+  if (dc) dc.textContent = displayCheck();
   const refreshStores = async () => { S.stores = (await api('bootstrap')).stores; };
 
   view.onsubmit = async (e) => {
