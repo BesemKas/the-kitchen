@@ -668,7 +668,7 @@ async function renderList() {
       const onList = new Set(items.filter((i) => !i.checked && i.product_id).map((i) => i.product_id));
       const low = S.products.filter((p) => ['low', 'out'].includes(pantryState(p)) && !onList.has(p.id))
         .sort((a, b) => (pantryState(a) === 'out' ? 0 : 1) - (pantryState(b) === 'out' ? 0 : 1) || (b.bought_count || 0) - (a.bought_count || 0)).slice(0, 8);
-      return low.length ? `<section class="card stack"><h2>Running low at home</h2>${low.map((p) => `<div class="row"><span class="grow">${esc(p.name)} <span class="small ${pantryState(p) === 'out' ? 'bad-text' : 'warn-text'}">${PANTRY_LABEL[pantryState(p)].toLowerCase()}</span></span><button type="button" class="btn small" data-addlow="${p.id}">＋ Add</button></div>`).join('')}</section>` : '';
+      return low.length ? `<section class="card stack"><h2>Buy again</h2><p class="small muted">Low or out at home.</p>${low.map((p) => `<div class="row"><span class="grow">${esc(p.name)} <span class="small ${pantryState(p) === 'out' ? 'bad-text' : 'warn-text'}">${PANTRY_LABEL[pantryState(p)].toLowerCase()}</span></span><button type="button" class="btn small" data-addlow="${p.id}">＋ Add</button></div>`).join('')}</section>` : '';
     })()}
     ${where ? whereToShopHtml(where) : ''}
 
@@ -1566,38 +1566,68 @@ async function usualsSheet() {
 }
 
 /* ================= PRODUCTS ================= */
+/* ----- Kitchen: what's at home right now. The catalogue is a search away, not a list. ----- */
+const HOME_PLACE = { 'Meat & fish': 'fridge', 'Dairy & eggs': 'fridge', 'Fresh produce': 'fridge', Frozen: 'freezer' };
+const HOME_GROUPS = [['fridge', 'Fridge and fresh'], ['freezer', 'Freezer'], ['cupboard', 'Cupboard']];
+/** Anything in the Household aisle is not food: it counts in the budget but never sits in the Kitchen. */
+const isFood = (p) => (p.category || '') !== 'Household';
+const FRIDGE_WORDS = /\b(chees|milk|yog|(?<!peanut |nut )butter|(?<!ice )cream|chicken|beef|mince|pork|lamb|fish|hake|salmon|egg|bacon|ham|polony|vienna|russian|boerewors|wors|hummus|lettuce|spinach|tomato(?!.*(sauce|paste|tin|can))|cucumber|berr)/i;
+const FREEZER_WORDS = /\b(frozen|ice cream|ice-cream)/i;
+/** Fridge, freezer or cupboard: the aisle when it says, otherwise a guess from the name. */
+const homePlace = (p) => HOME_PLACE[p.category] || (p.category ? 'cupboard' : FREEZER_WORDS.test(p.name) ? 'freezer' : FRIDGE_WORDS.test(p.name) ? 'fridge' : 'cupboard');
+const atHome = (p) => isFood(p) && p.pantry > 0;
+
 async function renderProducts() {
   await loadProducts();
-  const q = (store.get('prodSearch', '') || '').toLowerCase();
   view.innerHTML = `
-    <button type="button" class="card fridge-line" data-act="fridge" id="fridgeLine"><span class="grow"><span class="small muted">Fridge and freezer</span><b>Meals ready</b></span><span aria-hidden="true">›</span></button>
     <div class="row">
-      <input id="prodSearch" class="grow" placeholder="Search products" value="${esc(q)}" autocomplete="off">
+      <input id="prodSearch" class="grow" type="search" placeholder="Find any product" value="${esc(store.get('prodSearch', '') || '')}" autocomplete="off" enterkeyhint="search">
       <button class="btn" data-act="scan" aria-label="Scan">📷</button>
-      <button class="btn primary" data-act="new">＋</button>
-    </div>
-    <div class="chips" role="group" aria-label="Sort products">
-      ${[['name', 'A–Z'], ['low', 'Low or out'], ['protein', 'Cheapest protein'], ['health', 'Healthiest']].map(([k, l]) => `<button type="button" class="chip ${(store.get('prodSort', 'name') === k) ? 'active' : ''}" data-sort="${k}">${l}</button>`).join('')}
+      <button class="btn primary" data-act="new" aria-label="New product">＋</button>
     </div>
     <div id="offBanner"></div>
-    <section class="card flush"><ul class="list" id="prodList"></ul></section>`;
-  const listEl = document.getElementById('prodList');
-  api('fridge.list').then(({ fridge }) => {
-    const el = document.getElementById('fridgeLine');
-    if (!el) return;
-    const n = fridge.reduce((t, f) => t + f.portions, 0);
-    const frozen = fridge.filter((f) => f.location === 'freezer').reduce((t, f) => t + f.portions, 0);
-    el.querySelector('b').textContent = n ? `${fmtQty(n)} meal${n === 1 ? '' : 's'} ready${frozen ? `, ${fmtQty(frozen)} frozen` : ''}` : 'Nothing cooked yet';
-  }).catch(() => {});
+    <div id="kitchenBody" class="stack"></div>`;
+  const body = document.getElementById('kitchenBody');
+  let fridge = null;
+  api('fridge.list').then((r) => { fridge = r.fridge; if (!document.getElementById('prodSearch').value.trim()) draw(); }).catch(() => { fridge = []; });
   const offBanner = () => {
     const n = S.offPending || 0;
     document.getElementById('offBanner').innerHTML = n ? `<button type="button" class="banner block-btn" data-act="off-refresh"><b>Get health ratings for ${n} scanned product${n === 1 ? '' : 's'}</b><span class="small">Nutri-Score, processing level and additives from Open Food Facts.</span></button>` : '';
   };
   offBanner();
+
+  const homeRow = (p) => {
+    const al = analyseProduct(p).alerts;
+    return `<li class="tap ${al.length ? 'has-alert' : ''}" data-id="${p.id}"><div class="grow"><div class="name">${esc(p.name)} ${healthBadges(p)}${al.length ? ' <span class="alert-dot">!</span>' : ''}</div>
+      <div class="sub">${[esc(p.brand || ''), packLabel(p)].filter(Boolean).join(' · ')}</div></div>${pantryChip(p)}</li>`;
+  };
+  const useSoonHtml = () => {
+    if (fridge === null) return '<section class="card"><p class="small muted">Checking the fridge…</p></section>';
+    if (!fridge.length) return '<button type="button" class="card fridge-line" data-act="fridge"><span class="grow"><span class="small muted">Meals ready</span><b>Nothing prepped</b></span><span aria-hidden="true">›</span></button>';
+    const meals = [...fridge].sort((a, b) => (a.location === 'freezer') - (b.location === 'freezer') || (a.days_left ?? 99) - (b.days_left ?? 99));
+    const when = (f) => (f.location === 'freezer' ? 'frozen' : f.days_left < 0 ? '<span class="bad-text">check before eating</span>' : f.days_left === 0 ? '<span class="warn-text">eat or freeze today</span>' : f.days_left === 1 ? '<span class="warn-text">eat by tomorrow</span>' : `eat by ${fmtDay(f.use_by)}`);
+    return `<section class="card stack tight"><div class="row between"><h2>Ready to eat</h2><button type="button" class="linklike" data-act="fridge">Open ›</button></div>
+      <ul class="list">${meals.slice(0, 5).map((f) => `<li class="tap" data-act="fridge"><div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${when(f)}</div></div><span class="num strong">${fmtQty(f.portions)}</span></li>`).join('')}</ul>
+      ${meals.length > 5 ? `<p class="small muted">and ${meals.length - 5} more</p>` : ''}</section>`;
+  };
+  const homeHtml = () => {
+    const home = S.products.filter(atHome).sort((a, b) => a.name.localeCompare(b.name));
+    const low = home.filter((p) => pantryState(p) === 'low');
+    const open = store.get('homeOpen', {}) || {};
+    const groups = HOME_GROUPS.map(([k, label]) => {
+      const rows = home.filter((p) => homePlace(p) === k && pantryState(p) !== 'low');
+      return rows.length ? `<details class="card flush home-group" data-group="${k}" ${open[k] ? 'open' : ''}><summary><b>${label}</b><span class="muted">${rows.length}</span></summary>
+        <ul class="list">${rows.map(homeRow).join('')}</ul></details>` : '';
+    }).join('');
+    return `${useSoonHtml()}
+      ${low.length ? `<section class="card flush"><h2 class="pad">Running low</h2><ul class="list">${low.map(homeRow).join('')}</ul></section>` : ''}
+      ${groups || (low.length ? '' : `<section class="card stack tight"><b>Nothing at home yet</b><span class="small muted">What you buy lands here when you tap <b>Done shopping</b>. Already have something? Find it above and tap <b>I have this</b>.</span></section>`)}
+      ${home.length ? '<p class="small muted center">Tap Plenty / Low to update. Out moves it to Buy again in Shop. Cooking and logging food use things up for you.</p>' : ''}`;
+  };
+
   const sortKey = (p) => {
     const mode = store.get('prodSort', 'name');
     if (mode === 'protein') {
-      // protein foods first (at least 20% of energy from protein), so rice doesn't "win" on sheer quantity
       const v = proteinCost(p, priceAt(p.prices, S.storeId).price);
       if (v === null) return 1e9;
       return proteinShare(p) >= 0.2 ? v : 1e6 + v;
@@ -1605,36 +1635,50 @@ async function renderProducts() {
     if (mode === 'health') return (p.nutriscore ? p.nutriscore.charCodeAt(0) - 96 : 6) * 10 + (p.nova || 5);
     return 0;
   };
+  const searchHtml = (term) => {
+    const rows = S.products.filter((p) => `${p.name} ${p.brand || ''} ${p.category || ''} ${p.barcode || ''}`.toLowerCase().includes(term))
+      .sort((a, b) => sortKey(a) - sortKey(b) || a.name.localeCompare(b.name)).slice(0, 60);
+    return `<div class="chips" role="group" aria-label="Sort">
+        ${[['name', 'A–Z'], ['protein', 'Cheapest protein'], ['health', 'Healthiest']].map(([k, l]) => `<button type="button" class="chip ${(store.get('prodSort', 'name') === k) ? 'active' : ''}" data-sort="${k}">${l}</button>`).join('')}
+      </div>
+      <section class="card flush"><ul class="list">${rows.length ? rows.map((p) => {
+        const pr = priceAt(p.prices, S.storeId);
+        const pc = proteinCost(p, pr.price);
+        const al = analyseProduct(p).alerts;
+        return `<li class="tap ${al.length ? 'has-alert' : ''}" data-id="${p.id}"><div class="grow"><div class="name">${esc(p.name)} ${healthBadges(p)}${al.length ? ' <span class="alert-dot">!</span>' : ''}</div>
+          <div class="sub">${[esc(p.brand || ''), packLabel(p), atHome(p) ? `<span class="accent">${PANTRY_LABEL[pantryState(p)].toLowerCase()}</span>` : ''].filter(Boolean).join(' · ')}</div>
+          ${pc !== null ? `<div class="sub protein-cost">${proteinLabel(pc)}</div>` : ''}</div>
+          <div class="right"><div class="num strong">${pr.shared ? '≈' : ''}${money(pr.price)}</div></div>
+          <button type="button" class="icon-btn add-btn" data-add="${p.id}" aria-label="Add ${esc(p.name)} to the list">＋</button></li>`;
+      }).join('') : '<li class="empty">Nothing found yet. Searching all products…</li>'}</ul></section>`;
+  };
+
   const draw = () => {
     const term = document.getElementById('prodSearch').value.trim().toLowerCase();
     store.set('prodSearch', term);
-    const lowOnly = store.get('prodSort', 'name') === 'low';
-    const rows = S.products.filter((p) => (!term || `${p.name} ${p.brand || ''} ${p.category || ''} ${p.barcode || ''}`.toLowerCase().includes(term)) && (!lowOnly || ['low', 'out'].includes(pantryState(p))))
-      .sort((a, b) => sortKey(a) - sortKey(b) || a.name.localeCompare(b.name));
-    listEl.innerHTML = rows.length ? rows.map((p) => {
-      const pr = priceAt(p.prices, S.storeId);
-      const n = Object.keys(p.prices).length;
-      const pc = proteinCost(p, pr.price);
-      const al = analyseProduct(p).alerts;
-      return `<li class="tap ${al.length ? 'has-alert' : ''}" data-id="${p.id}"><div class="grow"><div class="name">${esc(p.name)} ${healthBadges(p)}${al.length ? ` <span class="alert-dot" title="${al.length} alert${al.length === 1 ? '' : 's'}">!</span>` : ''}</div>
-        <div class="sub">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price)].filter(Boolean).join(' · ')}</div>
-        ${pantryChip(p)}
-        ${pc !== null ? `<div class="sub protein-cost">${proteinLabel(pc)}</div>` : ''}</div>
-        <div class="right"><div class="num strong">${money(pr.price)}</div><div class="small muted">${pr.price === null ? 'no price' : pr.here ? esc(storeName(pr.storeId)) : `at ${esc(storeName(pr.storeId))}`}${n > 1 ? ` · ${n} shops` : ''}</div></div>
-        <button type="button" class="icon-btn add-btn" data-add="${p.id}" aria-label="Add ${esc(p.name)} to the list">＋</button></li>`;
-    }).join('') : `<li class="empty">${S.products.length ? 'No matches.' : 'No products yet. Scan something or tap ＋.'}</li>`;
+    body.innerHTML = term ? searchHtml(term) : homeHtml();
   };
   draw();
   view.oninput = (e) => { if (e.target.id === 'prodSearch') { draw(); searchFurther(e.target.value, draw); } };
+  body.addEventListener('toggle', (e) => {
+    const g = e.target.closest && e.target.closest('[data-group]');
+    if (!g) return;
+    const open = store.get('homeOpen', {}) || {};
+    open[g.dataset.group] = g.open; store.set('homeOpen', open);
+  }, true);
   view.onclick = async (e) => {
     const chip = e.target.closest('[data-pantry]');
     if (chip) {
       const p = S.products.find((x) => x.id === Number(chip.dataset.pantry));
-      try { const st = await cyclePantry(p); toast(`${p.name}: ${PANTRY_LABEL[st]}`); draw(); } catch (er) { fail(er); }
+      try {
+        const st = await cyclePantry(p);
+        toast(st === 'out' ? `${p.name} is out. It's under Buy again in Shop.` : `${p.name}: ${PANTRY_LABEL[st]}`);
+        draw();
+      } catch (er) { fail(er); }
       return;
     }
     const sortBtn = e.target.closest('[data-sort]');
-    if (sortBtn) { store.set('prodSort', sortBtn.dataset.sort); view.querySelectorAll('[data-sort]').forEach((b) => b.classList.toggle('active', b === sortBtn)); return draw(); }
+    if (sortBtn) { store.set('prodSort', sortBtn.dataset.sort); return draw(); }
     const act = e.target.closest('[data-act]');
     if (act && act.dataset.act === 'fridge') return fridgeSheet();
     if (act && act.dataset.act === 'off-refresh') {
@@ -2094,7 +2138,8 @@ function productView(p, { from = 'products', item = null } = {}) {
       </button>` : (a.known ? '<p class="small muted">No ingredient list yet. Add it from the label to check additives.</p>' : '')}
     ${swap ? swapCardHtml(p, swap) : ''}
     ${item ? `<div class="grid2"><button class="btn primary" data-act="item-price">${pr.here && !pr.shared ? 'Change the price' : `Add the ${esc(storeName(S.storeId))} price`}</button><button class="btn" data-act="edit">Edit product</button></div>`
-      : '<div class="grid2"><button class="btn primary" data-act="add">Add to list</button><button class="btn" data-act="edit">Edit</button></div>'}`);
+      : `<div class="grid2"><button class="btn primary" data-act="add">Add to list</button><button class="btn" data-act="edit">Edit</button></div>
+        ${isFood(p) && !atHome(p) ? '<button class="btn block" data-act="have">I have this at home</button>' : ''}`}`);
   sheetBody.onclick = async (e) => {
     const t = e.target.closest('[data-act],[data-code]');
     if (!t) return;
@@ -2104,6 +2149,11 @@ function productView(p, { from = 'products', item = null } = {}) {
         case 'xray': return xraySheet(p, () => productView(p, { from, item }));
         case 'swaps': return swapsSheet(p, () => productView(p, { from, item }));
         case 'item-price': closeSheet(); if (await askItemPrice(item)) route(); return;
+        case 'have': {
+          await api('pantry.set', { product_id: p.id, amount: pantryAmountFor(p, 'plenty') });
+          p.pantry = pantryAmountFor(p, 'plenty'); if (!p.bought_count) p.bought_count = 1;
+          closeSheet(); toast(`${p.name} is in your Kitchen`); return route();
+        }
         case 'edit': closeSheet(); return productEditor(p);
         case 'add': await api('list.add', { product_id: p.id, qty: 1 }); closeSheet(); toast(`${p.name} added to the list`); return route();
         default:

@@ -248,3 +248,13 @@ Prices differ between branches, so they're never shared across them.
 - Where you haven't priced something yourself, you see the newest price someone else at that branch paid in the last 60 days, marked ≈. Your own prices always win, and a shared price is never saved as yours.
 - No names travel with a shared price.
 - **Share prices at the same branch** (on by default) turns it off. Off means you don't share and don't see others' prices either.
+
+## Kitchen: what's at home
+
+The Kitchen tab shows only what's at home, not every product.
+
+- **Ready to eat:** prepped meals in the fridge and freezer, the ones to eat first on top.
+- **Running low**, then **Fridge and fresh**, **Freezer** and **Cupboard**, folded so each is one line until you open it. The place comes from the product's aisle, or a guess from its name when it has none.
+- Things arrive when you tap **Done shopping**, and get used up when you cook a recipe or log food in the diary. Tap Plenty / Low / Out to correct it. Out moves an item to **Buy again** on Shop.
+- Products in the **Household** aisle are not food: they count in the budget but never show here.
+- Searching (top of the screen) reaches every product. Open one and tap **I have this at home** to add something you already had.
