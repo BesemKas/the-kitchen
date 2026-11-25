@@ -836,13 +836,13 @@ function shareable_barcode(?string $b): bool
     return $b !== null && preg_match('/^(\d{8}|\d{12,14})$/', $b) === 1 && $b[0] !== '2' && !str_starts_with($b, '02');
 }
 
-function off_http(string $path, ?array $post = null): array
+function off_http(string $path, ?array $post = null, int $timeout = 20): array
 {
     $base = rtrim((string)config('off_base', 'https://world.openfoodfacts.org'), '/');
     $ch = curl_init($base . $path);
     $opts = [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 20,
+        CURLOPT_TIMEOUT => $timeout,
         CURLOPT_CONNECTTIMEOUT => 5,
         CURLOPT_USERAGENT => 'KitchenBudget/1.0 (' . (string)config('off_contact', 'kitchen budget app') . ')',
     ];
@@ -2353,9 +2353,16 @@ try {
             function_exists('curl_init') || fail('This server cannot reach Open Food Facts');
             $page = int_in($in, 'page', false) ?: (int)setting('off_import_page', '1');
             $fields = 'code,product_name,brands,quantity,product_quantity,product_quantity_unit,nutriments,nutriscore_grade,nova_group,additives_tags,ingredients_text_en,ingredients_text';
-            [$code, $body] = off_http("/api/v2/search?countries_tags=en:south-africa&fields=$fields&page_size=100&page=$page&sort_by=unique_scans_n");
+            // Open Food Facts answers 503 whenever its shared search limit is used up; the app waits and tries again
+            try {
+                [$code, $body] = off_http("/api/v2/search?countries_tags=en:south-africa&fields=$fields&page_size=100&page=$page", null, 45);
+            } catch (RuntimeException $e) {
+                [$code, $body] = [0, ''];
+            }
             $d = json_decode($body, true);
-            ($code === 200 && is_array($d)) || fail("Open Food Facts didn't answer (HTTP $code). Try again in a minute.", 502);
+            if ($code !== 200 || !is_array($d)) {
+                fail($code === 0 ? 'Open Food Facts took too long to answer' : "Open Food Facts is busy (HTTP $code)", 503);
+            }
             $added = $updated = 0;
             foreach ((array)($d['products'] ?? []) as $op) {
                 $bc = preg_replace('/\D/', '', (string)($op['code'] ?? ''));

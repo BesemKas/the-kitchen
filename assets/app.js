@@ -3422,10 +3422,25 @@ async function renderBudget(mode = 'money') {
         const st = document.getElementById('importStatus');
         t.disabled = true;
         let added = 0;
+        let tries = 0;
+        const WAITS = [30, 60, 120, 180, 300];   // seconds to wait after each busy answer in a row
+        const sleep = (sec) => new Promise((res) => setTimeout(res, sec * 1000));
         for (;;) {
           if (location.hash !== '#me') { toast('Loading paused. Tap the button again to carry on.'); break; }
           let r;
-          try { r = await api('admin.off_import'); } catch (er) { st.textContent = `Stopped: ${er.message}`; break; }
+          try {
+            r = await post('admin.off_import', {}, 60000);   // their searches can take 30 s or more
+            tries = 0;
+          } catch (er) {
+            const busy = er.offline || er.status === 503 || er.status === 502 || er.status === 504;
+            if (!busy || tries >= WAITS.length) { st.textContent = `Stopped: ${er.message || 'no answer'}. Tap the button to carry on from the same page.`; break; }
+            const wait = WAITS[tries++];
+            for (let left = wait; left > 0 && location.hash === '#me'; left -= 5) {
+              st.textContent = `${er.message || 'No answer from Open Food Facts'}. Trying again in ${left} s (try ${tries} of ${WAITS.length}). ${added} new products so far.`;
+              await sleep(Math.min(5, left));
+            }
+            continue;
+          }
           added += r.added;
           st.textContent = `Page ${r.page} of ${r.pages}: ${added} new products so far, ${r.catalogue} in the catalogue.`;
           if (r.done) { st.textContent += ' Done.'; toast('South African products loaded'); break; }
