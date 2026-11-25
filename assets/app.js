@@ -555,7 +555,8 @@ function ringSvg(spent, list, budget) {
 
 async function renderList() {
   startListPoll();
-  const [{ items, spent, budget, takeaway, fridge, today: todayMeals, last_shop: lastShop }] = await Promise.all([api('list.get'), S.products.length ? null : loadProducts()]);
+  const [{ items, spent, budget, takeaway, fridge, today: todayMeals, last_shop: lastShop, period }] = await Promise.all([api('list.get'), S.products.length ? null : loadProducts()]);
+  if (period) S.period = period;
   S.takeawayWeekly = takeaway.weekly;
   S.spent = spent; S.budget = budget; updatePill();
 
@@ -572,7 +573,7 @@ async function renderList() {
   const checkedTotal = sum(done);
   const left = budget - spent;
   const after = left - listTotal;
-  const monthName = new Date().toLocaleDateString('en-ZA', { month: 'long' });
+  const periodText = S.period && S.period.end ? `until ${fmtDay(S.period.end).replace(/^\w+ /, '')}` : `for ${new Date().toLocaleDateString('en-ZA', { month: 'long' })}`;
 
   // whole list priced at each shop
   const compare = S.stores.map((s) => {
@@ -589,15 +590,25 @@ async function renderList() {
   const complete = compare.filter((c) => c.count > 0 && c.known === c.count);
   const cheapest = complete.length > 1 ? complete.reduce((a, b) => (a.total <= b.total ? a : b)).id : null;
   const where = shopCompare(lines.map(({ it }) => it));
+  // items with alerts, and what the best swaps would save for the same protein
+  let alertCount = 0; let swapSave = 0;
+  for (const { it } of open) {
+    const prod = it.product_id ? S.products.find((x) => x.id === it.product_id) : null;
+    if (!prod || !analyseProduct(prod).alerts.length) continue;
+    alertCount++;
+    const sw = bestSwap(prod); const m = sw ? swapMaths(prod, sw) : null;
+    if (m && m.saving > 0) swapSave += m.saving * it.qty;
+  }
+  const alertSummary = alertCount ? `<button type="button" class="alert-banner lv-amber" data-act="alerts-review"><span class="grow"><b>${alertCount} item${alertCount === 1 ? ' has an alert' : 's have alerts'}.</b>${swapSave >= 1 ? ` Swapping saves about ${money0(swapSave)} for the same protein.` : ' Tap one to see why.'}</span><span aria-hidden="true">›</span></button>` : '';
 
   view.innerHTML = `
     ${budget > 0 ? '' : `<a class="banner" href="#budget"><b>Set your monthly grocery budget</b><span class="small">Budget tab → Settings. Then this shows what's left.</span></a>`}
     <section class="ring-card ${budget > 0 ? '' : 'hidden'}">
       ${ringSvg(spent, listTotal, budget)}
       <div class="ring-text">
-        <span class="small muted">Left for ${esc(monthName)}</span>
+        <span class="small muted">Left ${esc(periodText)}</span>
         <span class="big">${money0(left)}</span>
-        ${items.length ? `<span class="small ${after < 0 ? 'bad-text' : 'good-text'}">${after < 0 ? `${money0(-after)} over after this list` : `${money0(after)} after this list`}</span>` : `<span class="small muted">of ${money0(budget)} this month</span>`}
+        ${items.length ? `<span class="small ${after < 0 ? 'bad-text' : 'good-text'}">${after < 0 ? `${money0(-after)} over after this list` : `${money0(after)} after this list`}</span>` : `<span class="small muted">of ${money0(budget)} this pay month</span>`}
       </div>
     </section>
 
@@ -612,6 +623,7 @@ async function renderList() {
     </div>`}
 
     <div class="heading-row"><h1>To buy <span class="muted">${open.length}</span></h1><span class="num strong">${money(openTotal)}</span></div>
+    ${alertSummary}
     ${open.length ? aisleGroups(open).map(([cat, rows]) => `${cat !== null ? `<div class="aisle">${esc(cat)}</div>` : ''}<ul class="items">${rows.map(rowHtml).join('')}</ul>`).join('')
       : `<p class="empty">${done.length ? 'Everything is in the trolley.' : 'Nothing on the list. Add items below, or plan your week and tap “Put the week on my list”.'}</p>`}
 
@@ -647,10 +659,13 @@ async function renderList() {
       }
     }
     const line = p.price === null ? null : p.price * it.qty;
-    return `<li class="${p.price === null && !it.checked ? 'noprice' : ''}" data-id="${it.id}">
+    const prod = it.product_id ? S.products.find((x) => x.id === it.product_id) : null;
+    const al = prod && !it.checked ? analyseProduct(prod).alerts : [];
+    if (al.length) sub.unshift(`<button type="button" class="linklike ${levelClass(al[0])}-text" data-act="product">Alert: ${esc(al[0].word ? al[0].name : `${al[0].name} (${al[0].label})`)} ›</button>`);
+    return `<li class="${p.price === null && !it.checked ? 'noprice' : ''} ${al.length ? `has-alert ${levelClass(al[0])}` : ''}" data-id="${it.id}">
       <input type="checkbox" data-act="check" ${it.checked ? 'checked' : ''} aria-label="${esc(it.name)}">
       <div class="grow">
-        <div class="name">${esc(it.name)}${it.from_plan && !it.checked ? '<span class="tag">plan</span>' : ''}</div>
+        <div class="name">${esc(it.name)}${prod && prod.nutriscore ? ` <span class="ns mini ns-${prod.nutriscore}">${prod.nutriscore.toUpperCase()}</span>` : ''}${it.from_plan && !it.checked ? '<span class="tag">plan</span>' : ''}</div>
         ${sub.length ? `<div class="sub">${sub.join(' · ')}</div>` : ''}
       </div>
       <div class="item-right">
@@ -735,6 +750,11 @@ async function renderList() {
         case 'scan': return scanFlow('list');
         case 'usuals': return usualsSheet();
         case 'checkout': return checkoutSheet(checkedTotal);
+        case 'product': { const pr = S.products.find((x) => x.id === it.product_id); return pr && productView(pr, { from: 'list' }); }
+        case 'alerts-review': {
+          const first = items.filter((i) => !i.checked && i.product_id).map((i) => S.products.find((x) => x.id === i.product_id)).find((x) => x && analyseProduct(x).alerts.length);
+          return first && productView(first, { from: 'list' });
+        }
         case 'clear-checked':
         case 'clear-all': {
           const all = el.dataset.act === 'clear-all';
@@ -755,11 +775,13 @@ async function renderList() {
 /* ---------- home: meals ready + takeaways ---------- */
 function homeCardsHtml(fridge, takeaway, lastShop) {
   const portions = fridge.reduce((s, f) => s + f.portions, 0);
-  const oldest = fridge.reduce((m, f) => (m && m.age_days >= f.age_days ? m : f), null);
-  let fridgeNote = portions ? `${fridge.length} batch${fridge.length === 1 ? '' : 'es'}` : 'Cook something';
+  const frozen = fridge.filter((f) => f.location === 'freezer').reduce((s, f) => s + f.portions, 0);
+  const chilled = fridge.filter((f) => f.location !== 'freezer');
+  const due = chilled.reduce((m, f) => (m && m.days_left <= f.days_left ? m : f), null);
+  let fridgeNote = portions ? (frozen ? `${fmtQty(frozen)} in the freezer` : `${fridge.length} batch${fridge.length === 1 ? '' : 'es'}`) : 'Cook something';
   let fridgeClass = 'muted';
-  if (oldest && oldest.age_days >= 4) { fridgeNote = `${esc(oldest.name)}: ${oldest.age_days} days old`; fridgeClass = 'bad-text'; }
-  else if (oldest && oldest.age_days >= 3) { fridgeNote = `Eat the ${esc(oldest.name)} first`; fridgeClass = 'warn-text'; }
+  if (due && due.days_left < 0) { fridgeNote = `${esc(due.name)}: past 3 days, check it`; fridgeClass = 'bad-text'; }
+  else if (due && due.days_left <= 1) { fridgeNote = `${esc(due.name)}: eat or freeze ${due.days_left === 0 ? 'today' : 'by tomorrow'}`; fridgeClass = 'warn-text'; }
   const left = takeaway.weekly - takeaway.spent;
   const days = lastShop ? Math.floor((new Date() - parseIso(lastShop)) / 86400000) : null;
   return `<div class="grid2">
@@ -799,20 +821,34 @@ function todayHtml(meals, fridge) {
 const refreshHome = () => { if (location.hash === '' || location.hash === '#list') route(); };
 
 function fridgeSheet() {
+  const useBy = (f) => {
+    if (f.location === 'freezer') return { text: `frozen${f.moved_on ? ` ${fmtDay(f.moved_on)}` : ''} · good for months`, cls: 'muted' };
+    if (f.days_left < 0) return { text: `past ${f.moved_on ? 'its 2 days since thawing' : '3 days'}: check before eating`, cls: 'bad-text' };
+    if (f.days_left === 0) return { text: 'eat or freeze today', cls: 'warn-text' };
+    if (f.days_left === 1) return { text: 'eat or freeze by tomorrow', cls: 'warn-text' };
+    return { text: `eat by ${fmtDay(f.use_by)}`, cls: 'muted' };
+  };
+  const rowHtml = (f) => {
+    const u = useBy(f);
+    return `<li class="fridge-row" data-id="${f.id}">
+      <div class="fr-top"><span class="name grow">${esc(f.name)}</span><span class="big-n num">${fmtQty(f.portions)}<span class="small muted"> left</span></span></div>
+      <div class="fr-bottom">
+        <span class="sub grow"><span class="${u.cls}">${u.text}</span>${f.grams_per_portion ? ` · ${f.grams_per_portion} g each` : ''}${f.cost_per_portion !== null ? ` · ${money(f.cost_per_portion)} each` : ''}</span>
+        <button class="icon-btn" data-act="more" aria-label="Change or bin ${esc(f.name)}">⋯</button>
+        ${f.location === 'freezer' ? '<button class="btn small" data-act="thaw">Thaw</button>' : '<button class="btn small" data-act="freeze">Freeze</button>'}
+        <button class="btn small primary" data-act="eat">Ate one</button>
+      </div></li>`;
+  };
   const draw = (fridge) => {
-    openSheet(`${sheetHead('Meals in the fridge')}
-      ${fridge.length ? `<ul class="list card flush">${fridge.map((f) => {
-        const ageCls = f.age_days >= 4 ? 'bad-text' : f.age_days >= 3 ? 'warn-text' : 'muted';
-        const age = f.age_days === 0 ? 'cooked today' : f.age_days === 1 ? 'cooked yesterday' : `cooked ${f.age_days} days ago`;
-        return `<li class="fridge-row" data-id="${f.id}">
-          <div class="fr-top"><span class="name grow">${esc(f.name)}</span><span class="big-n num">${fmtQty(f.portions)}<span class="small muted"> left</span></span></div>
-          <div class="fr-bottom">
-            <span class="sub grow"><span class="${ageCls}">${age}</span>${f.grams_per_portion ? ` · ${f.grams_per_portion} g each` : ''}${f.cost_per_portion !== null ? ` · ${money(f.cost_per_portion)} each` : ''}</span>
-            <button class="icon-btn" data-act="more" aria-label="Change or bin ${esc(f.name)}">⋯</button>
-            <button class="btn small primary" data-act="eat">Ate one</button>
-          </div></li>`;
-      }).join('')}</ul>
-      <p class="small muted">Cooked food keeps about 3–4 days in the fridge. Freeze what you won't get to.</p>` : '<p class="empty">Nothing cooked yet. Open a recipe and tap “Cooked it”, or finish cook mode.</p>'}
+    const chilled = fridge.filter((f) => f.location !== 'freezer');
+    const frozen = fridge.filter((f) => f.location === 'freezer');
+    openSheet(`${sheetHead('Meals ready')}
+      ${fridge.length ? `
+        <h3>In the fridge</h3>
+        ${chilled.length ? `<ul class="list card flush">${chilled.map(rowHtml).join('')}</ul>` : '<p class="small muted">Nothing in the fridge. Thaw a portion from the freezer the night before.</p>'}
+        <p class="small muted">Cooked food keeps about 3 days in the fridge (2 after thawing). Freeze what you won't get to.</p>
+        ${frozen.length ? `<h3>In the freezer</h3><ul class="list card flush">${frozen.map(rowHtml).join('')}</ul>` : ''}`
+        : '<p class="empty">Nothing cooked yet. Open a recipe and tap “Cooked it”, or finish cook mode.</p>'}
       <button class="btn block" data-act="add">＋ Add cooked food</button>`, refreshHome);
     sheetBody.onclick = async (e) => {
       const a = e.target.closest('[data-act]');
@@ -821,8 +857,20 @@ function fridgeSheet() {
       const f = li ? fridge.find((x) => x.id === Number(li.dataset.id)) : null;
       try {
         if (a.dataset.act === 'eat') { draw((await api('fridge.eat', { id: f.id })).fridge); toast('Enjoy'); }
+        if (a.dataset.act === 'freeze' || a.dataset.act === 'thaw') {
+          const to = a.dataset.act === 'freeze' ? 'freezer' : 'fridge';
+          let n = f.portions;
+          if (f.portions > 1) {
+            const v = await askNumber(`${to === 'freezer' ? 'Freeze' : 'Thaw'} how many portions of ${f.name}?`, f.portions, { hint: to === 'freezer' ? 'The rest stays in the fridge.' : 'Thawed portions keep 2 days in the fridge.', step: '1' });
+            if (v === null) return fridgeSheet();
+            n = Number(v);
+            if (!(n > 0)) return fridgeSheet();
+          }
+          draw((await api('fridge.move', { id: f.id, to, n: Math.min(n, f.portions) })).fridge);
+          toast(to === 'freezer' ? 'In the freezer' : 'Thawing in the fridge');
+        }
         if (a.dataset.act === 'more') {
-          const v = await askNumber(`${f.name}: portions left`, f.portions, { hint: 'Set to 0 if it was eaten, frozen elsewhere or binned.', step: '1' });
+          const v = await askNumber(`${f.name}: portions left`, f.portions, { hint: 'Set to 0 if it was eaten or binned.', step: '1' });
           if (v === null) return fridgeSheet();
           draw((await api('fridge.set', { id: f.id, portions: v })).fridge);
         }
@@ -831,6 +879,11 @@ function fridgeSheet() {
     };
   };
   api('fridge.list').then((r) => draw(r.fridge)).catch(fail);
+}
+
+/** "2026-11-28" -> "Sat 28 Nov" */
+function fmtDay(isoDate) {
+  return parseIso(isoDate).toLocaleDateString('en-ZA', { weekday: 'short', day: 'numeric', month: 'short' });
 }
 
 async function addCookedSheet() {
@@ -857,11 +910,18 @@ async function addCookedSheet() {
 }
 
 function takeawaySheet(onClose = refreshHome) {
-  const draw = (t, portions) => {
+  const draw = (t, fridge) => {
     const left = t.weekly - t.spent;
+    const ready = fridge.filter((f) => f.location !== 'freezer' && f.days_left >= 0);
+    const frozen = fridge.filter((f) => f.location === 'freezer');
+    const priced = ready.filter((f) => f.cost_per_portion !== null);
+    const avg = priced.length ? priced.reduce((s, f) => s + f.cost_per_portion * f.portions, 0) / priced.reduce((s, f) => s + f.portions, 0) : null;
     openSheet(`${sheetHead('Log a takeaway')}
       <div class="row between"><span class="muted">Left this week</span><b class="num ${left < 0 ? 'bad-text' : 'good-text'}">${money(left)}</b></div>
-      ${portions ? `<p class="small muted">You have ${fmtQty(portions)} meal${portions === 1 ? '' : 's'} ready in the fridge.</p>` : ''}
+      ${ready.length ? `<section class="card stack tight prep-nudge"><b>Ready to eat at home</b>
+          ${ready.slice(0, 3).map((f) => `<div class="row between small"><span>${fmtQty(f.portions)} × ${esc(f.name)}</span><span class="muted">${f.cost_per_portion !== null ? `${money(f.cost_per_portion)} each` : ''}</span></div>`).join('')}
+          <span class="small accent" id="taCompare">${avg ? `A prepped meal costs about ${money(avg)}.` : ''}</span></section>`
+        : frozen.length ? `<p class="small muted">Nothing in the fridge, but ${fmtQty(frozen.reduce((s, f) => s + f.portions, 0))} portion${frozen.reduce((s, f) => s + f.portions, 0) === 1 ? '' : 's'} in the freezer. Thaw one for tomorrow?</p>` : ''}
       <form class="stack" id="taForm">
         <label>Amount (R) <input name="total" type="number" inputmode="decimal" min="0" step="0.01" required></label>
         <label>Where / what <input name="note" placeholder="Nando's, pizza night…"></label>
@@ -872,6 +932,12 @@ function takeawaySheet(onClose = refreshHome) {
       <p class="small muted">Weekly allowance ${money0(t.weekly)}. Change it on the Budget tab.</p>`,
     onClose);
     setTimeout(() => { const i = sheetBody.querySelector('[name=total]'); if (i) i.focus(); }, 60);
+    sheetBody.oninput = (e) => {
+      const c = document.getElementById('taCompare');
+      if (e.target.name !== 'total' || !c || !avg) return;
+      const v = Number(e.target.value);
+      c.textContent = v > 0 ? `This takeaway = ${fmtQty(round(v / avg, 1))} prepped meals (about ${money(avg)} each).` : `A prepped meal costs about ${money(avg)}.`;
+    };
     sheetBody.onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;
@@ -879,17 +945,17 @@ function takeawaySheet(onClose = refreshHome) {
         const r = await api('takeaway.add', { total: f.total.value, note: f.note.value, date: f.date.value });
         const l = r.takeaway.weekly - r.takeaway.spent;
         toast(l >= 0 ? `Logged. ${money0(l)} left this week` : `Logged. ${money0(-l)} over this week`);
-        draw(r.takeaway, portions);
+        draw(r.takeaway, fridge);
       } catch (er) { fail(er); }
     };
     sheetBody.onclick = async (e) => {
       const d = e.target.closest('[data-del]');
       if (!d || !confirm('Delete this takeaway?')) return;
-      try { await api('trips.delete', { id: d.dataset.del }); draw((await api('takeaway.get')).takeaway, portions); } catch (er) { fail(er); }
+      try { await api('trips.delete', { id: d.dataset.del }); draw((await api('takeaway.get')).takeaway, fridge); } catch (er) { fail(er); }
     };
   };
   Promise.all([api('takeaway.get'), api('fridge.list')])
-    .then(([t, f]) => draw(t.takeaway, f.fridge.reduce((s, x) => s + x.portions, 0)))
+    .then(([t, f]) => draw(t.takeaway, f.fridge))
     .catch(fail);
 }
 
@@ -1080,8 +1146,9 @@ async function scanFlow(from) {
       }
       if (r.instore) return pickProductSheet(from, "That's the shop's own label for weighed meat or deli: it holds a price, not a product. Which product is it?");
       if (r.product) {
-        if (from === 'list') return quickAddSheet(r.product);
-        return productEditor(r.product);
+        const known = S.products.find((x) => x.id === r.product.id) || r.product;
+        if (from === 'list') return analyseProduct(known).alerts.length ? scanAlertSheet(known) : quickAddSheet(known);
+        return productView(known);
       }
       const s = r.suggestion || {};
       toast(r.suggestion ? 'Found on Open Food Facts. Check the details and add a price' : 'New product. Fill in the details');
@@ -1243,7 +1310,8 @@ async function renderProducts() {
       const pr = priceAt(p.prices, S.storeId);
       const n = Object.keys(p.prices).length;
       const pc = proteinCost(p, pr.price);
-      return `<li class="tap" data-id="${p.id}"><div class="grow"><div class="name">${esc(p.name)} ${healthBadges(p)}</div>
+      const al = analyseProduct(p).alerts;
+      return `<li class="tap ${al.length ? 'has-alert' : ''}" data-id="${p.id}"><div class="grow"><div class="name">${esc(p.name)} ${healthBadges(p)}${al.length ? ` <span class="alert-dot" title="${al.length} alert${al.length === 1 ? '' : 's'}">!</span>` : ''}</div>
         <div class="sub">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price), p.pantry > 0 ? `<span class="good-text">${fmtAmount(p.pantry, p.unit)} at home</span>` : ''].filter(Boolean).join(' · ')}</div>
         ${pc !== null ? `<div class="sub protein-cost">${proteinLabel(pc)}</div>` : ''}</div>
         <div class="right"><div class="num strong">${money(pr.price)}</div><div class="small muted">${pr.price === null ? 'no price' : pr.here ? esc(storeName(pr.storeId)) : `at ${esc(storeName(pr.storeId))}`}${n > 1 ? ` · ${n} shops` : ''}</div></div>
@@ -1279,7 +1347,7 @@ async function renderProducts() {
       return;
     }
     const li = e.target.closest('li[data-id]');
-    if (li) productEditor(S.products.find((p) => p.id === Number(li.dataset.id)));
+    if (li) productView(S.products.find((p) => p.id === Number(li.dataset.id)));
   };
 }
 
@@ -1458,6 +1526,418 @@ function productEditor(p, { addToList = false } = {}) {
       toast(addToList ? 'Saved and added to list' : 'Saved');
       await loadProducts();
       route();
+    } catch (er) { fail(er); }
+  };
+}
+
+/* ================= HEALTH: product view, X-ray, alerts, swaps ================= */
+/* What we know about common additives: [name, what it is, level, note].
+   level 'red' = a regulator acts on it (EU warning label or ban); 'amber' = keep it occasional; null = nothing flagged.
+   Anything else is only flagged when the person adds it to their own alerts. */
+const SIX = 'EU packs must warn it "may have an adverse effect on activity and attention in children". Still allowed in South Africa.';
+const NITRITE = "Cures processed meat. The WHO's cancer agency classes processed meat as a cause of bowel cancer, so keep it occasional.";
+const SULPHITE = 'Can trigger asthma in people sensitive to sulphites.';
+const ADDITIVES = {
+  e100: ['Curcumin', 'yellow colouring'], e120: ['Cochineal (carmine)', 'red colouring, made from insects'],
+  e150a: ['Caramel colour', 'brown colouring'], e150c: ['Caramel colour', 'brown colouring'], e150d: ['Caramel colour', 'brown colouring'],
+  e160a: ['Carotenes', 'orange colouring'], e160c: ['Paprika extract', 'red colouring'], e162: ['Beetroot red', 'red colouring'],
+  e102: ['Tartrazine', 'yellow colouring', 'red', SIX], e104: ['Quinoline yellow', 'yellow colouring', 'red', SIX],
+  e110: ['Sunset yellow', 'orange colouring', 'red', SIX], e122: ['Carmoisine', 'red colouring', 'red', SIX],
+  e124: ['Ponceau 4R', 'red colouring', 'red', SIX], e129: ['Allura red', 'red colouring', 'red', SIX],
+  e171: ['Titanium dioxide', 'white colouring', 'red', 'Not allowed in food in the EU since 2022. Still allowed in South Africa.'],
+  e200: ['Sorbic acid', 'preservative'], e202: ['Potassium sorbate', 'preservative'], e211: ['Sodium benzoate', 'preservative'],
+  e220: ['Sulphur dioxide', 'preservative', null, SULPHITE], e221: ['Sodium sulphite', 'preservative', null, SULPHITE],
+  e222: ['Sodium bisulphite', 'preservative', null, SULPHITE], e223: ['Sodium metabisulphite', 'preservative', null, SULPHITE],
+  e224: ['Potassium metabisulphite', 'preservative', null, SULPHITE], e226: ['Calcium sulphite', 'preservative', null, SULPHITE],
+  e227: ['Calcium bisulphite', 'preservative', null, SULPHITE], e228: ['Potassium bisulphite', 'preservative', null, SULPHITE],
+  e249: ['Potassium nitrite', 'curing salt', 'amber', NITRITE], e250: ['Sodium nitrite', 'curing salt', 'amber', NITRITE],
+  e251: ['Sodium nitrate', 'curing salt', 'amber', NITRITE], e252: ['Potassium nitrate', 'curing salt', 'amber', NITRITE],
+  e260: ['Acetic acid', 'acidity regulator'], e270: ['Lactic acid', 'acidity regulator'], e281: ['Sodium propionate', 'preservative'],
+  e282: ['Calcium propionate', 'preservative'], e290: ['Carbon dioxide', 'fizz'], e296: ['Malic acid', 'acidity regulator'],
+  e300: ['Ascorbic acid (vitamin C)', 'antioxidant'], e301: ['Sodium ascorbate', 'antioxidant'], e306: ['Tocopherols (vitamin E)', 'antioxidant'],
+  e316: ['Sodium erythorbate', 'antioxidant'], e322: ['Lecithins', 'emulsifier'], e330: ['Citric acid', 'acidity regulator'],
+  e331: ['Sodium citrates', 'acidity regulator'], e332: ['Potassium citrates', 'acidity regulator'], e338: ['Phosphoric acid', 'acidity regulator'],
+  e339: ['Sodium phosphates', 'stabiliser'], e341: ['Calcium phosphates', 'stabiliser'], e401: ['Sodium alginate', 'thickener'],
+  e407: ['Carrageenan', 'thickener'], e410: ['Locust bean gum', 'thickener'], e412: ['Guar gum', 'thickener'], e414: ['Gum arabic', 'thickener'],
+  e415: ['Xanthan gum', 'thickener'], e420: ['Sorbitol', 'sweetener'], e421: ['Mannitol', 'sweetener'], e440: ['Pectins', 'thickener'],
+  e450: ['Diphosphates', 'stabiliser'], e451: ['Triphosphates', 'stabiliser'], e452: ['Polyphosphates', 'stabiliser'],
+  e460: ['Cellulose', 'thickener'], e466: ['Carboxymethyl cellulose', 'thickener'], e471: ['Mono- and diglycerides', 'emulsifier'],
+  e481: ['Sodium stearoyl lactylate', 'emulsifier'], e500: ['Sodium carbonates', 'raising agent'], e503: ['Ammonium carbonates', 'raising agent'],
+  e508: ['Potassium chloride', 'salt replacer'], e551: ['Silicon dioxide', 'anti-caking agent'],
+  e620: ['Glutamic acid', 'flavour enhancer'], e621: ['MSG (monosodium glutamate)', 'flavour enhancer'], e627: ['Disodium guanylate', 'flavour enhancer'],
+  e631: ['Disodium inosinate', 'flavour enhancer'], e635: ['Disodium ribonucleotides', 'flavour enhancer'],
+  e950: ['Acesulfame K', 'sweetener'], e951: ['Aspartame', 'sweetener', null, 'In 2023 the WHO\'s cancer agency called it "possibly carcinogenic"; the food safety experts kept the same daily limit.'],
+  e952: ['Cyclamate', 'sweetener'], e954: ['Saccharin', 'sweetener'], e955: ['Sucralose', 'sweetener'], e960: ['Steviol glycosides (stevia)', 'sweetener'],
+  e961: ['Neotame', 'sweetener'], e962: ['Aspartame-acesulfame salt', 'sweetener'], e965: ['Maltitol', 'sweetener'], e966: ['Lactitol', 'sweetener'],
+  e967: ['Xylitol', 'sweetener'], e968: ['Erythritol', 'sweetener'],
+  e1404: ['Modified starch', 'thickener'], e1412: ['Modified starch', 'thickener'], e1414: ['Modified starch', 'thickener'],
+  e1420: ['Modified starch', 'thickener'], e1422: ['Modified starch', 'thickener'], e1442: ['Modified starch', 'thickener'],
+};
+const ALERT_GROUPS = {
+  sweeteners: { name: 'Sweeteners', what: 'Aspartame, sucralose, acesulfame K, cyclamate, saccharin, stevia…',
+    codes: ['e420', 'e421', 'e950', 'e951', 'e952', 'e954', 'e955', 'e960', 'e961', 'e962', 'e965', 'e966', 'e967', 'e968'],
+    words: ['aspartame', 'sucralose', 'acesulfame', 'cyclamate', 'saccharin', 'sweetener'] },
+  colours: { name: 'Colours with an EU warning', what: 'The six: E102, E104, E110, E122, E124, E129', codes: ['e102', 'e104', 'e110', 'e122', 'e124', 'e129'], words: ['tartrazine', 'allura red', 'sunset yellow'] },
+  nitrites: { name: 'Nitrites and nitrates', what: 'Curing salts in processed meat (E249–E252)', codes: ['e249', 'e250', 'e251', 'e252'], words: ['nitrite', 'nitrate'] },
+  sulphites: { name: 'Sulphites', what: 'Preservatives that can trigger asthma (E220–E228)', codes: ['e220', 'e221', 'e222', 'e223', 'e224', 'e226', 'e227', 'e228'], words: ['sulphite', 'sulfite', 'sulphur dioxide'] },
+  enhancers: { name: 'Flavour enhancers (MSG)', what: 'MSG and friends (E620–E635)', codes: ['e620', 'e621', 'e627', 'e631', 'e635'], words: ['monosodium glutamate', 'msg'] },
+};
+const capital = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const hasNutrition = (p) => NUTRIENTS.some(([k]) => p[k] !== null && p[k] !== undefined && p[k] !== '');
+const isCode = (c) => /^e\d{3,4}[a-z]?$/.test(c);
+const ICON_BELL = '<svg class="ico-bell" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-label="You asked for this" role="img"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>';
+
+/** Everything flagged in a product for this person, with their own alert choices applied. */
+function analyseProduct(p) {
+  const prefs = S.alerts || {};
+  const text = (p.ingredients || '').toLowerCase();
+  const codes = new Set((p.additives || []).map((c) => String(c).toLowerCase()));
+  for (const m of text.matchAll(/\be\s?-?\s?(\d{3,4}[a-z]?)\b/gi)) codes.add(`e${m[1].toLowerCase()}`);
+  const items = [...codes].sort().map((code) => {
+    const [name, what, level = null, note = ''] = ADDITIVES[code] || [code.toUpperCase(), 'additive'];
+    const groups = Object.keys(ALERT_GROUPS).filter((g) => ALERT_GROUPS[g].codes.includes(code));
+    let mine = prefs[code] || null;
+    if (!mine && groups.some((g) => prefs[`group:${g}`] === 'always')) mine = 'always';
+    return { code, label: code.toUpperCase(), name, what, baseLevel: level, level: mine === 'never' ? null : level, mine, groups, note };
+  });
+  // words on the person's watchlist, and words that belong to a watched group, found in the ingredient list
+  const seen = new Set(items.map((i) => i.code));
+  for (const [code, mode] of Object.entries(prefs)) {
+    if (mode !== 'always') continue;
+    const words = code.startsWith('group:') ? ((ALERT_GROUPS[code.slice(6)] || {}).words || []) : (isCode(code) ? [] : [code]);
+    const groupName = code.startsWith('group:') ? (ALERT_GROUPS[code.slice(6)] || {}).name : '';
+    for (const w of words) {
+      if (!text.includes(w) || seen.has(w)) continue;
+      if (code.startsWith('group:') && items.some((i) => i.groups.includes(code.slice(6)))) continue;   // already shown by E-number
+      seen.add(w);
+      items.push({ code: w, label: w, name: capital(w), what: groupName || 'on your watchlist', baseLevel: null, level: null, mine: 'always', groups: [], note: '', word: true });
+    }
+  }
+  const alerts = items.filter((i) => i.mine === 'always' || i.level === 'red');
+  const known = !!(p.ingredients || codes.size || p.nutriscore || p.nova || hasNutrition(p));
+  return { items, alerts, known };
+}
+
+/** One plain sentence for an alert, words first and the code after. */
+function alertSentence(i) {
+  const id = i.word ? '' : ` (${i.label})`;
+  if (i.level === 'red' || i.level === 'amber') return `${i.name}${id}, a ${i.what}. ${i.note}`;
+  return `${i.name}${id}${i.what && !i.word ? `, a ${i.what}` : ''}: you asked to hear about this.`;
+}
+const sevRank = (i) => (i.level === 'red' ? 0 : i.level === 'amber' ? 1 : i.mine === 'always' ? 2 : 3);
+const levelClass = (i) => (i.level === 'red' ? 'lv-red' : i.level === 'amber' ? 'lv-amber' : i.mine === 'always' ? 'lv-mine' : 'lv-none');
+const levelWord = (i) => (i.level === 'red' ? 'Regulator warning' : i.level === 'amber' ? 'Keep it occasional' : i.mine === 'never' ? "You don't flag this" : i.mine === 'always' ? 'Your alert' : 'Nothing flagged');
+
+/** UK traffic-light bands per 100 g (or 100 ml for drinks). */
+function trafficHtml(p) {
+  if (!hasNutrition(p) || p.unit === 'each') return '';
+  const drink = ['ml', 'l'].includes(p.unit);
+  const salt = p.sodium_mg === null || p.sodium_mg === undefined ? null : (p.sodium_mg * 2.5) / 1000;
+  const rows = [
+    ['Fat', p.fat_g, drink ? [1.5, 8.75] : [3, 17.5]], ['Sat. fat', p.satfat_g, drink ? [0.75, 2.5] : [1.5, 5]],
+    ['Sugar', p.sugar_g, drink ? [2.5, 11.25] : [5, 22.5]], ['Salt', salt, drink ? [0.3, 0.75] : [0.3, 1.5]],
+  ];
+  return `<div class="tl">${rows.map(([n, v, [lo, hi]]) => {
+    if (v === null || v === undefined || v === '') return `<span class="tl-pill tl-unknown"><b>${n}</b> ?</span>`;
+    const c = v > hi ? 'tl-high' : v <= lo ? 'tl-low' : 'tl-med';
+    const word = v > hi ? 'High' : v <= lo ? 'Low' : 'Med';
+    return `<span class="tl-pill ${c}"><b>${n}</b> ${fmtQty(round(v, 1))} g<span class="tl-word">${word}</span></span>`;
+  }).join('')}</div>`;
+}
+
+function nutriScoreHtml(p) {
+  const strip = p.nutriscore
+    ? `<div class="ns-strip">${'abcde'.split('').map((g) => `<span class="ns ns-${g} ${g === p.nutriscore ? 'on' : ''}">${g.toUpperCase()}</span>`).join('')}</div>`
+    : '<div class="ns-strip unknown"><span>Not known yet</span><span class="small muted">Open Food Facts has no score for it</span></div>';
+  const nova = p.nova
+    ? `<div class="row between"><b class="small">Processing</b><span class="small nova-${p.nova} strong">NOVA ${p.nova} · ${NOVA[p.nova]}</span></div>
+       <div class="nova-bar">${[1, 2, 3, 4].map((n) => `<span class="${n === p.nova ? `on nova-${p.nova}` : ''}"></span>`).join('')}</div>`
+    : '<div class="row between"><b class="small">Processing</b><span class="small muted">Not known yet</span></div>';
+  return `<section class="card stack tight">
+    <div class="row between"><b>Nutri-Score</b><span class="small muted">${p.nutriscore ? 'Open Food Facts' : ''}</span></div>
+    ${strip}${trafficHtml(p)}${nova}</section>`;
+}
+
+function nutritionTableHtml(p) {
+  if (!hasNutrition(p)) return '';
+  const per = p.unit === 'each' ? 'per item' : ['ml', 'l'].includes(p.unit) ? 'per 100 ml' : 'per 100 g';
+  const v = (k, u) => (p[k] === null || p[k] === undefined || p[k] === '' ? '<span class="muted">?</span>' : `${fmtQty(round(Number(p[k]), 1))} ${u}`);
+  const salt = p.sodium_mg === null || p.sodium_mg === undefined ? '<span class="muted">?</span>' : `${fmtQty(round((p.sodium_mg * 2.5) / 1000, 2))} g`;
+  const rows = [...NUTRIENTS.map(([k, label, u]) => [label, v(k, u)]), ['Salt', salt]];
+  return `<section class="card stack tight"><div class="row between"><b>Nutrition ${per}</b><span class="small muted">${p.pack_size ? `pack: ${packLabel(p) || fmtQty(p.pack_size)}` : ''}</span></div>
+    <div class="nt">${rows.map(([l, x]) => `<div><span class="muted">${l}</span><b>${x}</b></div>`).join('')}</div></section>`;
+}
+
+/** The ingredient list with every flagged or known additive as a tappable chip. */
+function xrayText(p, a, { tag = 'button' } = {}) {
+  const open = (cls, code) => (tag === 'button' ? `<button type="button" class="xr ${cls}" data-code="${esc(code)}">` : `<span class="xr ${cls}">`);
+  const byCode = Object.fromEntries(a.items.map((i) => [i.code, i]));
+  let html = esc(p.ingredients || '');
+  html = html.replace(/\b[Ee]\s?-?\s?(\d{3,4}[a-z]?)\b/g, (m, n) => {
+    const i = byCode[`e${n.toLowerCase()}`];
+    return i ? `${open(levelClass(i), i.code)}${esc(m)}${i.mine === 'always' ? ICON_BELL : ''}</${tag}>` : esc(m);
+  });
+  for (const i of a.items.filter((x) => x.word)) {
+    html = html.replace(new RegExp(`\\b(${i.code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'i'), `${open('lv-mine', i.code)}$1${ICON_BELL}</${tag}>`);
+  }
+  return html;
+}
+
+/** Same aisle, no alerts, ranked by cheapest protein (or healthiest). */
+function swapsFor(p, mode = 'protein') {
+  const cat = (p.category || '').trim().toLowerCase();
+  if (!cat) return [];
+  const nsRank = (x) => (x.nutriscore ? x.nutriscore.charCodeAt(0) : 120) * 10 + (x.nova || 5);
+  return S.products.filter((x) => x.id !== p.id && (x.category || '').trim().toLowerCase() === cat)
+    .map((x) => { const pr = priceAt(x.prices, S.storeId); return { p: x, price: pr.price, pc: proteinCost(x, pr.price), a: analyseProduct(x) }; })
+    .filter((c) => c.a.alerts.length === 0)
+    .sort(mode === 'health' ? (a, b) => nsRank(a.p) - nsRank(b.p) : (a, b) => (a.pc ?? 1e9) - (b.pc ?? 1e9));
+}
+const packGrams = (p) => ({ g: 1, kg: 1000, ml: 1, l: 1000 }[p.unit] || null);
+const packProtein = (p) => (p.protein_g > 0 ? (packGrams(p) ? (p.protein_g * p.pack_size * packGrams(p)) / 100 : p.protein_g * p.pack_size) : 0);
+const packSalt = (p) => (p.sodium_mg === null || p.sodium_mg === undefined ? null : ((packGrams(p) ? (p.sodium_mg * p.pack_size * packGrams(p)) / 100 : p.sodium_mg * p.pack_size) * 2.5) / 1000);
+function bestSwap(p) {
+  const mine = proteinCost(p, priceAt(p.prices, S.storeId).price);
+  const list = swapsFor(p);
+  const better = (c) => c.pc !== null && (mine === null || c.pc < mine - 0.01);
+  const healthier = (c) => (c.p.nutriscore || 'z') < (p.nutriscore || 'z');
+  return list.find(better) || list.find(healthier) || null;
+}
+/** What the swap does for the same protein as one pack of p. */
+function swapMaths(p, c) {
+  const price = priceAt(p.prices, S.storeId).price;
+  const P = packProtein(p);
+  if (!P || c.pc === null || price === null) return null;
+  const cost = (c.pc * P) / 10;
+  const sp = packSalt(c.p); const cpP = packProtein(c.p);
+  return { protein: P, cost, price, saving: price - cost, salt: packSalt(p), swapSalt: sp !== null && cpP ? (sp / cpP) * P : null };
+}
+function swapCardHtml(p, c, { link = true } = {}) {
+  const m = swapMaths(p, c);
+  return `<${link ? 'button type="button" data-act="swaps"' : 'div'} class="card stack tight swap-card">
+    <div class="row between"><span class="small muted caps">Swap from your products</span>${link ? '<span class="small accent">Compare ›</span>' : ''}</div>
+    <div class="row gap">${c.p.nutriscore ? `<span class="ns ns-${c.p.nutriscore}">${c.p.nutriscore.toUpperCase()}</span>` : ''}
+      <div class="grow"><b>${esc(c.p.name)}</b><div class="small muted">${[packLabel(c.p), c.price !== null ? money(c.price) : 'no price', 'no alerts'].filter(Boolean).join(' · ')}</div></div>
+      ${c.pc !== null ? `<div class="right"><b class="accent">${money(c.pc)}</b><div class="small muted">per 10 g protein</div></div>` : ''}</div>
+    ${m && m.saving > 0.5 ? `<div class="small">Same ${Math.round(m.protein)} g of protein as your ${esc(packLabel(p) || 'pack')}: <b class="accent">${money(m.cost)}</b> instead of ${money(m.price)}</div>` : ''}
+  </${link ? 'button' : 'div'}>`;
+}
+
+/** The product screen: alerts, Nutri-Score, nutrition, ingredients, best swap. */
+function productView(p, { from = 'products' } = {}) {
+  const a = analyseProduct(p);
+  const pr = priceAt(p.prices, S.storeId);
+  const pc = proteinCost(p, pr.price);
+  const swap = bestSwap(p);
+  const first = a.alerts[0];
+  openSheet(`${sheetHead(p.name)}
+    <p class="small muted">${[esc(p.brand || ''), packLabel(p), pr.price !== null ? `${money(pr.price)}${pr.here ? '' : ` at ${esc(storeName(pr.storeId))}`}` : 'no price yet', pc !== null ? `<span class="accent">${proteinLabel(pc)}</span>` : ''].filter(Boolean).join(' · ')}</p>
+    ${first ? `<button type="button" class="alert-banner ${levelClass(first)}" data-act="xray"><span class="grow">${esc(alertSentence(first))}${a.alerts.length > 1 ? ` <b>+${a.alerts.length - 1} more</b>` : ''}</span><span aria-hidden="true">›</span></button>` : ''}
+    ${a.known ? '' : `<section class="card stack tight unknown-card"><b>We don't know what's in this yet</b>
+      <span class="small muted">No Nutri-Score, nutrition or ingredients. Not knowing isn't the same as clean: add the label once and it's there for both of you.</span>
+      <button type="button" class="btn small" data-act="edit">📷 Add the label</button></section>`}
+    ${a.known ? nutriScoreHtml(p) : ''}
+    ${nutritionTableHtml(p)}
+    ${p.ingredients || a.items.length ? `<button type="button" class="card stack tight xray-card" data-act="xray">
+        <div class="row between"><b>Ingredients</b><span class="small accent">X-ray ›</span></div>
+        <span class="xray-chips">${[...a.items].sort((x, y) => sevRank(x) - sevRank(y)).map((i) => `<span class="xr ${levelClass(i)}">${esc(i.word ? i.name : `${i.label} ${i.name.split(' (')[0]}`)}${i.mine === 'always' ? ICON_BELL : ''}</span>`).join('') || '<span class="small muted">No additives</span>'}</span>
+        ${p.ingredients ? `<span class="small muted">${p.ingredients.split(',').length} ingredients · tap to read the whole list</span>` : ''}
+      </button>` : (a.known ? '<p class="small muted">No ingredient list yet. Add it from the label to check additives.</p>' : '')}
+    ${swap ? swapCardHtml(p, swap) : ''}
+    <div class="grid2"><button class="btn primary" data-act="add">Add to list</button><button class="btn" data-act="edit">Edit</button></div>`);
+  sheetBody.onclick = async (e) => {
+    const t = e.target.closest('[data-act],[data-code]');
+    if (!t) return;
+    try {
+      if (t.dataset.code) return additiveSheet(t.dataset.code, p, () => productView(p, { from }));
+      switch (t.dataset.act) {
+        case 'xray': return xraySheet(p, () => productView(p, { from }));
+        case 'swaps': return swapsSheet(p, () => productView(p, { from }));
+        case 'edit': closeSheet(); return productEditor(p);
+        case 'add': await api('list.add', { product_id: p.id, qty: 1 }); closeSheet(); toast(`${p.name} added to the list`); return route();
+        default:
+      }
+    } catch (er) { fail(er); }
+  };
+}
+
+function xraySheet(p, back) {
+  const a = analyseProduct(p);
+  openSheet(`${sheetHead('Ingredient X-ray')}
+    <p class="small muted">${esc(p.name)}</p>
+    <div class="legend"><span><i class="lv-red"></i>Regulator warning</span><span><i class="lv-amber"></i>Keep it occasional</span><span>${ICON_BELL} Your alert</span><span><i class="lv-none"></i>Nothing flagged</span></div>
+    ${p.ingredients ? `<p class="card xray-text">${xrayText(p, a)}</p><p class="small muted">Ingredients are listed biggest first. Tap a highlighted one.</p>` : '<p class="small muted">No ingredient list saved, only the additives from Open Food Facts.</p>'}
+    ${a.items.length ? `<ul class="list card flush">${a.items.map((i) => `<li class="tap" data-code="${esc(i.code)}"><span class="xr ${levelClass(i)}">${esc(i.word ? i.name : i.label)}</span><div class="grow"><div class="name">${esc(i.word ? i.what : i.name)}</div><div class="sub">${esc(levelWord(i))}</div></div>${i.mine === 'always' ? ICON_BELL : ''}<span class="muted">›</span></li>`).join('')}</ul>` : '<p class="small muted">No additives found.</p>'}
+    <button type="button" class="btn block" data-act="manage">Manage my ingredient alerts</button>
+    ${back ? '<button type="button" class="btn block ghost" data-act="back">Back</button>' : ''}`);
+  sheetBody.onclick = (e) => {
+    const c = e.target.closest('[data-code]');
+    if (c) return additiveSheet(c.dataset.code, p, () => xraySheet(p, back));
+    const t = e.target.closest('[data-act]');
+    if (!t) return;
+    if (t.dataset.act === 'manage') return alertsSheet(() => xraySheet(p, back));
+    if (t.dataset.act === 'back') return back();
+  };
+}
+
+async function setAlert(code, mode) {
+  S.alerts = (await api('alerts.set', { code, mode })).alerts || {};
+  if (Array.isArray(S.alerts)) S.alerts = {};
+}
+
+function additiveSheet(code, p, back) {
+  const draw = () => {
+    const i = analyseProduct(p).items.find((x) => x.code === code) || (() => {
+      const [name, what, level = null, note = ''] = ADDITIVES[code] || [code.toUpperCase(), isCode(code) ? 'additive' : 'on your watchlist'];
+      return { code, label: code.toUpperCase(), name, what, level, baseLevel: level, mine: (S.alerts || {})[code] || null, groups: [], note, word: !isCode(code) };
+    })();
+    const mode = (S.alerts || {})[code] || (i.mine === 'always' ? 'always' : null);
+    const viaGroup = !(S.alerts || {})[code] && i.mine === 'always' ? i.groups.map((g) => ALERT_GROUPS[g].name).join(', ') : '';
+    openSheet(`${sheetHead(i.word ? i.name : `${i.label} · ${i.name}`)}
+      <span class="lv-tag ${levelClass({ ...i, level: i.baseLevel })}">${esc(i.baseLevel === 'red' ? 'Regulator warning' : i.baseLevel === 'amber' ? 'Keep it occasional' : 'Nothing flagged by regulators')}</span>
+      ${i.note ? `<p>${esc(i.note)}</p>` : `<p class="muted">${i.word ? 'A word on your own watchlist.' : 'Approved for use, and nothing here flags it. You can still choose to hear about it.'}</p>`}
+      <div class="grid2 small"><div class="card tight"><span class="muted">What it is</span><b>${esc(capital(i.what))}</b></div>
+        <div class="card tight"><span class="muted">Why it's flagged</span><b>${esc(i.baseLevel === 'red' ? (code === 'e171' ? 'Banned in the EU' : 'EU warning label') : i.baseLevel === 'amber' ? 'Processed meat' : 'Only if you ask')}</b></div></div>
+      <b class="small">When it's in something I scan or add</b>
+      <div class="seg" role="group" aria-label="Alerts for ${esc(i.label)}">
+        <button type="button" data-mode="always" aria-pressed="${mode === 'always'}" class="${mode === 'always' ? 'on' : ''}">Always alert me</button>
+        <button type="button" data-mode="never" aria-pressed="${mode === 'never'}" class="${mode === 'never' ? 'on' : ''}">Don't flag this</button>
+      </div>
+      <p class="small muted">${mode === 'always' ? `You'll get a pop-up whenever you scan or add something with ${esc(i.word ? i.name : i.label)}.${viaGroup ? ` (On because of: ${esc(viaGroup)}.)` : ''}`
+        : mode === 'never' ? `${esc(i.word ? i.name : i.label)} won't be highlighted or alerted on any product.`
+        : i.baseLevel === 'red' ? 'Regulator warnings alert you unless you choose “Don\'t flag this”.' : 'Shown in the X-ray, no pop-ups.'}</p>
+      ${mode ? '<button type="button" class="btn small ghost" data-mode="">Back to normal</button>' : ''}
+      <button type="button" class="btn block" data-act="manage">Manage all ingredient alerts</button>
+      ${back ? '<button type="button" class="btn block ghost" data-act="back">Back</button>' : ''}`);
+    sheetBody.onclick = async (e) => {
+      const m = e.target.closest('[data-mode]');
+      if (m) {
+        const want = m.dataset.mode || null;
+        try { await setAlert(code, want === mode ? null : want); draw(); } catch (er) { fail(er); }
+        return;
+      }
+      const t = e.target.closest('[data-act]');
+      if (!t) return;
+      if (t.dataset.act === 'manage') return alertsSheet(() => additiveSheet(code, p, back));
+      if (t.dataset.act === 'back') return back();
+    };
+  };
+  draw();
+}
+
+function alertsSheet(back) {
+  const draw = () => {
+    const prefs = S.alerts || {};
+    const name = (c) => (c.startsWith('group:') ? (ALERT_GROUPS[c.slice(6)] || {}).name || c : isCode(c) ? `${c.toUpperCase()}${ADDITIVES[c] ? ` ${ADDITIVES[c][0]}` : ''}` : capital(c));
+    const list = (mode) => Object.keys(prefs).filter((c) => prefs[c] === mode && !c.startsWith('group:'));
+    openSheet(`${sheetHead('Ingredient alerts')}
+      <p class="small muted">Yours only. Red flags follow real regulator action (EU warnings and bans). Everything else is only flagged if you add it here.</p>
+      <form class="row" id="alAdd"><input name="code" class="grow" placeholder="E-number or word: E951, peanut, gluten" autocomplete="off" aria-label="Add an ingredient alert"><button class="btn">Add</button></form>
+      <h3>Quick groups</h3>
+      <div class="stack tight">${Object.entries(ALERT_GROUPS).map(([k, g]) => {
+        const on = prefs[`group:${k}`] === 'always';
+        return `<button type="button" class="toggle-row" data-group="${k}" aria-pressed="${on}"><span class="grow"><b>${esc(g.name)}</b><span class="small muted block">${esc(g.what)}</span></span><span class="switch ${on ? 'on' : ''}" aria-hidden="true"><i></i></span></button>`;
+      }).join('')}</div>
+      <h3>Always alert me</h3>
+      <div class="chips wrap">${list('always').map((c) => `<span class="chip-x lv-mine">${esc(name(c))}<button type="button" data-rm="${esc(c)}" aria-label="Remove ${esc(name(c))}">✕</button></span>`).join('') || '<span class="small muted">Nothing yet. Tap an ingredient in the X-ray, or add one above.</span>'}</div>
+      <h3>Don't flag</h3>
+      <div class="chips wrap">${list('never').map((c) => `<span class="chip-x">${esc(name(c))}<button type="button" data-rm="${esc(c)}" aria-label="Remove ${esc(name(c))}">✕</button></span>`).join('') || '<span class="small muted">Nothing hidden.</span>'}</div>
+      ${back ? '<button type="button" class="btn block ghost" data-act="back">Back</button>' : ''}`);
+    sheetBody.onsubmit = async (e) => {
+      e.preventDefault();
+      const v = e.target.code.value.trim();
+      if (!v) return;
+      try { await setAlert(v, 'always'); draw(); toast(`You'll be alerted about ${v}`); } catch (er) { fail(er); }
+    };
+    sheetBody.onclick = async (e) => {
+      const g = e.target.closest('[data-group]');
+      const rm = e.target.closest('[data-rm]');
+      try {
+        if (g) { const k = `group:${g.dataset.group}`; await setAlert(k, prefs[k] === 'always' ? null : 'always'); return draw(); }
+        if (rm) { await setAlert(rm.dataset.rm, null); return draw(); }
+      } catch (er) { return fail(er); }
+      const t = e.target.closest('[data-act]');
+      if (t && t.dataset.act === 'back') back();
+    };
+  };
+  draw();
+}
+
+function swapsSheet(p, back) {
+  let mode = 'protein';
+  const draw = () => {
+    const list = swapsFor(p, mode);
+    const pr = priceAt(p.prices, S.storeId);
+    const pc = proteinCost(p, pr.price);
+    const a = analyseProduct(p);
+    const best = list[0];
+    const m = best ? swapMaths(p, best) : null;
+    const onList = (S.listItems || []).some((i) => i.product_id === p.id && !i.checked);
+    openSheet(`${sheetHead(`Swaps for ${p.name}`)}
+      <p class="small muted">From products you've scanned or bought, in the same aisle (${esc(p.category || 'none set')}), with no alerts.</p>
+      <div class="chips" role="group" aria-label="Sort swaps">
+        <button type="button" class="chip ${mode === 'protein' ? 'active' : ''}" data-sort="protein">Cheapest protein</button>
+        <button type="button" class="chip ${mode === 'health' ? 'active' : ''}" data-sort="health">Healthiest</button>
+      </div>
+      <section class="card stack tight"><span class="small muted">Now</span>
+        <div class="row gap">${p.nutriscore ? `<span class="ns ns-${p.nutriscore}">${p.nutriscore.toUpperCase()}</span>` : ''}<div class="grow"><b>${esc(p.name)}</b><div class="small ${a.alerts.length ? 'bad-text' : 'muted'}">${a.alerts.length ? `${a.alerts.length} alert${a.alerts.length === 1 ? '' : 's'}` : 'no alerts'}${p.nova ? ` · NOVA ${p.nova}` : ''} · ${pr.price !== null ? money(pr.price) : 'no price'}</div></div>
+        ${pc !== null ? `<div class="right"><b>${money(pc)}</b><div class="small muted">per 10 g protein</div></div>` : ''}</div></section>
+      ${best ? `<section class="card stack tight best-swap"><div class="row between"><span class="small accent strong">BEST SWAP</span><span class="small muted">${best.price !== null ? money(best.price) : 'no price'}</span></div>
+        <div class="row gap">${best.p.nutriscore ? `<span class="ns ns-${best.p.nutriscore}">${best.p.nutriscore.toUpperCase()}</span>` : ''}<div class="grow"><b>${esc(best.p.name)}</b><div class="small muted">${[packLabel(best.p), 'no alerts', best.p.nova ? `NOVA ${best.p.nova}` : ''].filter(Boolean).join(' · ')}</div></div>
+        ${best.pc !== null ? `<div class="right"><b class="accent">${money(best.pc)}</b><div class="small muted">per 10 g protein</div></div>` : ''}</div>
+        ${m ? `<div class="small stack tight"><div class="row between"><span class="muted">${Math.round(m.protein)} g protein (your ${esc(packLabel(p) || 'pack')})</span><span>${m.saving > 0 ? `<s class="muted">${money(m.price)}</s> ` : ''}<b class="accent">${money(m.cost)}</b></span></div>
+          ${m.salt !== null && m.swapSalt !== null ? `<div class="row between"><span class="muted">Salt in that much</span><span><s class="muted">${fmtQty(round(m.salt, 1))} g</s> <b>${m.swapSalt < 1 ? 'under 1 g' : `${fmtQty(round(m.swapSalt, 1))} g`}</b></span></div>` : ''}</div>` : ''}
+        <button type="button" class="btn primary block" data-swap="${best.p.id}">${onList ? 'Swap on my list' : 'Add to my list'}</button></section>`
+        : `<p class="empty">${p.category ? 'No better option in this aisle yet. Scan a few alternatives next time you shop.' : 'Set an aisle on this product to see swaps.'}</p>`}
+      ${list.length > 1 ? `<ul class="list card flush">${list.slice(1, 6).map((c) => `<li><span class="ns ${c.p.nutriscore ? `ns-${c.p.nutriscore}` : 'ns-unknown'}">${c.p.nutriscore ? c.p.nutriscore.toUpperCase() : '?'}</span><div class="grow"><div class="name">${esc(c.p.name)}</div><div class="sub">${c.price !== null ? money(c.price) : 'no price'}${c.pc !== null ? ` · ${proteinLabel(c.pc)}` : ''}</div></div><button type="button" class="icon-btn add-btn" data-swap="${c.p.id}" aria-label="Use ${esc(c.p.name)} instead">⇄</button></li>`).join('')}</ul>` : ''}
+      ${back ? '<button type="button" class="btn block ghost" data-act="back">Back</button>' : ''}`);
+    sheetBody.onclick = async (e) => {
+      const s = e.target.closest('[data-sort]');
+      if (s) { mode = s.dataset.sort; return draw(); }
+      const sw = e.target.closest('[data-swap]');
+      if (sw) {
+        const to = S.products.find((x) => x.id === Number(sw.dataset.swap));
+        try {
+          if (onList) await api('list.swap', { from: p.id, to: to.id });
+          else await api('list.add', { product_id: to.id, qty: 1 });
+          closeSheet(); toast(onList ? `Swapped for ${to.name}` : `${to.name} added`); route();
+        } catch (er) { fail(er); }
+        return;
+      }
+      const t = e.target.closest('[data-act]');
+      if (t && t.dataset.act === 'back') back();
+    };
+  };
+  draw();
+}
+
+/** Scanning something with an alert in the shop: why, what's in it, and a swap. */
+function scanAlertSheet(p) {
+  const a = analyseProduct(p);
+  const swap = bestSwap(p);
+  const first = a.alerts[0];
+  openSheet(`<div class="sheet-head"><div class="row gap"><span class="alert-icon ${levelClass(first)}" aria-hidden="true">!</span><h2>${a.alerts.length === 1 ? `Contains ${esc(first.word ? first.name : first.label)}` : `${a.alerts.length} things before you buy`}</h2></div><button class="icon-btn" data-close aria-label="Close">✕</button></div>
+    <p class="small muted">${esc(p.name)}${priceAt(p.prices, S.storeId).price !== null ? ` · ${money(priceAt(p.prices, S.storeId).price)}` : ''}</p>
+    ${a.alerts.map((i) => `<div class="alert-banner static ${levelClass(i)}"><span class="grow">${esc(alertSentence(i))}${(S.alerts || {})[i.code] === 'always' ? '<span class="small muted block">You chose “Always alert me”. <button type="button" class="linklike" data-code="' + esc(i.code) + '">Change</button></span>' : ''}</span></div>`).join('')}
+    <div class="row wrap gap">${p.nutriscore ? `<span class="ns ns-${p.nutriscore}">Nutri-Score ${p.nutriscore.toUpperCase()}</span>` : ''}${p.nova ? `<span class="lv-tag nova-${p.nova}">NOVA ${p.nova}</span>` : ''}<button type="button" class="linklike" data-act="details">Full details ›</button></div>
+    ${nutritionTableHtml(p)}
+    ${swap ? swapCardHtml(p, swap) : ''}
+    <div class="grid2">${swap ? `<button class="btn primary" data-act="take" data-id="${swap.p.id}">Take the swap</button>` : ''}<button class="btn ${swap ? '' : 'primary'}" data-act="buy">Buy anyway</button></div>
+    <button type="button" class="btn block ghost" data-act="mute">Don't alert me about ${esc(first.word ? first.name : first.label)} again</button>`);
+  sheetBody.onclick = async (e) => {
+    const c = e.target.closest('[data-code]');
+    if (c) return additiveSheet(c.dataset.code, p, () => scanAlertSheet(p));
+    const t = e.target.closest('[data-act]');
+    if (!t) return;
+    try {
+      switch (t.dataset.act) {
+        case 'details': return productView(p, { from: 'scan' });
+        case 'swaps': return swapsSheet(p, () => scanAlertSheet(p));
+        case 'take': return quickAddSheet(S.products.find((x) => x.id === Number(t.dataset.id)));
+        case 'buy': return quickAddSheet(p);
+        case 'mute': await setAlert(first.code, 'never'); toast(`No more alerts about ${first.word ? first.name : first.label}`); return quickAddSheet(p);
+        default:
+      }
     } catch (er) { fail(er); }
   };
 }
@@ -2206,24 +2686,22 @@ async function planAddSheet(date, recipeId = null) {
 
 /* ================= BUDGET ================= */
 async function renderBudget() {
-  const month = store.get('budgetMonth', null) || S.month;
-  const b = await api('budget.get', { month });
+  const day = store.get('budgetDate', null);
+  const b = await api('budget.get', day ? { date: day } : {});
   S.aisles = b.aisle_order || [];
-  if (month === S.month) { S.spent = b.spent; S.budget = b.budget; updatePill(); }
+  const per = b.period;
+  const isCurrent = per.current;
+  if (isCurrent) { S.spent = b.spent; S.budget = b.budget; S.period = per; updatePill(); }
   const left = b.budget - b.spent;
-  const [y, m] = month.split('-').map(Number);
-  const now = new Date();
-  const isCurrent = y === now.getFullYear() && m === now.getMonth() + 1;
-  const daysInMonth = new Date(y, m, 0).getDate();
-  const daysLeft = isCurrent ? daysInMonth - now.getDate() + 1 : 0;
-  const monthLabel = new Date(y, m - 1, 1).toLocaleDateString('en-ZA', { month: 'long', year: 'numeric' });
-  const shift = (n) => { const d = new Date(y, m - 1 + n, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+  const daysLeft = per.days_left;
+  const monthLabel = per.label;
+  const dayShift = (d, n) => { const x = parseIso(d); x.setDate(x.getDate() + n); return iso(x); };
 
   view.innerHTML = `
     <div class="row">
-      <button class="btn small" data-month="${shift(-1)}">‹</button>
-      <button class="btn small grow" data-month="${S.month}">${monthLabel}</button>
-      <button class="btn small" data-month="${shift(1)}">›</button>
+      <button class="btn small" data-day="${dayShift(per.start, -1)}" aria-label="Previous pay month">‹</button>
+      <button class="btn small grow" data-day="">${esc(monthLabel)}</button>
+      <button class="btn small" data-day="${dayShift(per.end, 1)}" aria-label="Next pay month">›</button>
     </div>
     <section class="card stack">
       <div class="grid3 right">
@@ -2232,21 +2710,21 @@ async function renderBudget() {
         <div><div class="small muted">Left</div><b class="num ${left < 0 ? 'bad-text' : 'good-text'}">${money(left)}</b></div>
       </div>
       <div class="meter ${left < 0 ? 'bad' : left < b.budget * 0.2 ? 'warn' : ''}"><div id="bMeter"></div></div>
-      ${isCurrent && left > 0 ? `<p class="small muted">${daysLeft} day${daysLeft === 1 ? '' : 's'} left, so about ${money(left / daysLeft)} a day or ${money((left / daysLeft) * 7)} a week.</p>` : ''}
+      ${isCurrent && left > 0 ? `<p class="small muted">${daysLeft} day${daysLeft === 1 ? '' : 's'} to payday, so about ${money(left / daysLeft)} a day or ${money((left / daysLeft) * 7)} a week.</p>` : ''}
       ${left < 0 ? `<p class="small bad-text">Over budget by ${money(-left)}.</p>` : ''}
     </section>
 
     <section class="card stack">
       <div class="row between"><h2>Takeaways</h2><button class="btn small" data-act="log-ta">＋ Log</button></div>
       <div class="grid2 right">
-        <div><div class="small muted">This month</div><b class="num ${b.eating_out > b.takeaway_weekly * 52 / 12 ? 'bad-text' : ''}">${money(b.eating_out)}</b></div>
+        <div><div class="small muted">This pay month</div><b class="num ${b.eating_out > b.takeaway_weekly * 52 / 12 ? 'bad-text' : ''}">${money(b.eating_out)}</b></div>
         <div><div class="small muted">Allowance a month</div><b class="num">${money(b.takeaway_weekly * 52 / 12)}</b></div>
       </div>
       <p class="small muted">Kept separate from groceries, so the grocery budget stays honest.</p>
     </section>
 
     <section class="card flush">
-      <div class="section-head"><h2 class="grow">Shops this month</h2><button class="btn small" data-act="add-trip">＋ Log spend</button></div>
+      <div class="section-head"><h2 class="grow">Shops this pay month</h2><button class="btn small" data-act="add-trip">＋ Log spend</button></div>
       <ul class="list">${b.trips.map((t) => `<li><div class="grow"><div class="name">${esc(t.store || (t.kind === 'eating_out' ? (t.note || 'Takeaway') : 'Other'))}${t.kind === 'eating_out' ? '<span class="tag warn">takeaway</span>' : ''}</div>
         <div class="sub">${esc(t.trip_date)}${t.who ? ` · ${esc(t.who)}` : ''}${t.note && t.kind !== 'eating_out' ? ` · ${esc(t.note)}` : ''}${t.estimate !== null && t.estimate !== undefined && t.estimate > 0 ? ` · <span class="${Math.abs(t.total - t.estimate) / t.estimate > 0.05 ? 'warn-text' : 'good-text'}">est. ${money(t.estimate)}</span>` : ''}</div></div>
         <b class="num">${money(t.total)}</b><button class="icon-btn" data-del-trip="${t.id}" aria-label="Delete">✕</button></li>`).join('') || '<li class="empty">No shops logged yet.</li>'}</ul>
@@ -2255,6 +2733,10 @@ async function renderBudget() {
     <section class="card stack">
       <h2>Settings</h2>
       <form class="row" id="budgetForm"><label class="grow">Monthly grocery budget (R) <input name="monthly_budget" type="number" inputmode="decimal" step="0.01" min="0" value="${b.budget}"></label><button class="btn">Save</button></form>
+      <form class="row" id="paydayForm"><label class="grow">Payday (day of the month) <input name="payday" type="number" inputmode="numeric" min="1" max="31" step="1" value="${b.payday || 1}"></label><button class="btn">Save</button></form>
+      <div class="stack tight"><span class="small muted">Paid early (December!) or on a different day? Start the new pay month today.</span>
+        <button type="button" class="btn" data-act="paid-today">I got paid today</button>
+        ${(b.pay_marks || []).length ? `<span class="small muted">Marked paydays: ${b.pay_marks.map((d) => `${esc(fmtDay(d))} <button type="button" class="linklike" data-unmark="${d}" aria-label="Remove ${esc(d)}">✕</button>`).join(', ')}</span>` : ''}</div>
       <form class="stack" id="targets"><span class="small muted">My daily targets</span>
         <div class="grid2">
           <label>Protein (g) <input name="protein" type="number" inputmode="numeric" min="0" value="${(S.users.find((u) => u.id === S.user.id) || {}).protein_target_g ?? ''}"></label>
@@ -2285,6 +2767,7 @@ async function renderBudget() {
     e.preventDefault();
     try {
       if (e.target.id === 'budgetForm') { await api('budget.set', { monthly_budget: e.target.monthly_budget.value }); S.budget = Number(e.target.monthly_budget.value); toast('Budget saved'); }
+      if (e.target.id === 'paydayForm') { const r = await api('budget.set', { payday: e.target.payday.value }); S.period = r.period; store.set('budgetDate', null); toast(`Pay month now ${r.period.label}`); }
       if (e.target.id === 'targets') {
         await api('account.targets', { protein_target_g: e.target.protein.value, kj_target: e.target.kj.value });
         S.users = (await api('bootstrap')).users;
@@ -2299,7 +2782,7 @@ async function renderBudget() {
     } catch (er) { fail(er); }
   };
   view.onclick = async (e) => {
-    const t = e.target.closest('[data-month],[data-act],[data-del-trip],[data-del-store],[data-rename],[data-aisle-up],[data-aisle-del]');
+    const t = e.target.closest('[data-day],[data-act],[data-del-trip],[data-del-store],[data-rename],[data-aisle-up],[data-aisle-del],[data-unmark]');
     if (!t) return;
     try {
       if (t.dataset.aisleUp || t.dataset.aisleDel) {
@@ -2309,7 +2792,12 @@ async function renderBudget() {
         S.aisles = (await api('aisles.set', { order })).aisle_order;
         return renderBudget();
       }
-      if (t.dataset.month) { store.set('budgetMonth', t.dataset.month); return renderBudget(); }
+      if (t.dataset.day !== undefined) { store.set('budgetDate', t.dataset.day || null); return renderBudget(); }
+      if (t.dataset.act === 'paid-today') {
+        const r = await api('pay.mark', {});
+        S.period = r.period; store.set('budgetDate', null); toast(`New pay month started: ${r.period.label}`); return renderBudget();
+      }
+      if (t.dataset.unmark) { const r = await api('pay.unmark', { date: t.dataset.unmark }); S.period = r.period; return renderBudget(); }
       if (t.dataset.delTrip) { if (!confirm('Delete this logged shop?')) return; await api('trips.delete', { id: t.dataset.delTrip }); return renderBudget(); }
       if (t.dataset.delStore) {
         if (!confirm(`Delete ${storeName(t.dataset.delStore)}? All its saved prices go too.`)) return;
@@ -2374,10 +2862,11 @@ function passwordSheet() {
 (async function init() {
   try {
     const b = await api('bootstrap');
-    Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader });
+    Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader,
+      alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday });
     const saved = store.get('store', null);
     S.storeId = S.stores.some((s) => String(s.id) === String(saved)) ? String(saved) : (S.stores[0] ? String(S.stores[0].id) : null);
-    store.set('budgetMonth', null);
+    store.set('budgetDate', null);
     updatePill();
     route();
   } catch (e) {

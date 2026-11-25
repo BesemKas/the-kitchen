@@ -335,6 +335,73 @@ function recipes_with_costs(?int $onlyId = null): array
     return $result;
 }
 
+/**
+ * The pay period containing $date: from the latest payday on or before it to the day before the next one.
+ * Paydays are the usual day of the month (user setting 'payday', default the 1st), except where a marked
+ * pay date falls within 10 days of it (early December pay, a moved payday): the marked date wins.
+ */
+function pay_period(?string $date = null): array
+{
+    $d = new DateTimeImmutable($date ?? 'today');
+    $day = max(1, min(31, (int)user_setting('payday', '1')));
+    $marks = q('SELECT paid_on FROM pay_dates WHERE user_id = ? AND paid_on BETWEEN ? AND ?', [
+        me(), $d->modify('-100 days')->format('Y-m-d'), $d->modify('+100 days')->format('Y-m-d'),
+    ])->fetchAll(PDO::FETCH_COLUMN);
+    $starts = $marks;
+    for ($i = -3; $i <= 3; $i++) {
+        $m = $d->modify(sprintf('first day of %+d month', $i));
+        $usual = $m->setDate((int)$m->format('Y'), (int)$m->format('n'), min($day, (int)$m->format('t')));
+        $replaced = false;
+        foreach ($marks as $mk) {
+            if (abs((new DateTimeImmutable($mk))->getTimestamp() - $usual->getTimestamp()) <= 10 * 86400) {
+                $replaced = true;
+            }
+        }
+        if (!$replaced) {
+            $starts[] = $usual->format('Y-m-d');
+        }
+    }
+    $starts = array_values(array_unique($starts));
+    sort($starts);
+    $key = $d->format('Y-m-d');
+    $start = null;
+    $next = null;
+    foreach ($starts as $st) {
+        if ($st <= $key) {
+            $start = $st;
+        } elseif ($next === null) {
+            $next = $st;
+        }
+    }
+    $s = new DateTimeImmutable($start);
+    $e = (new DateTimeImmutable($next))->modify('-1 day');
+    $today = new DateTimeImmutable('today');
+    $wholeMonth = $s->format('j') === '1' && $e->format('j') === $e->format('t') && $s->format('Y-m') === $e->format('Y-m');
+    return [
+        'start' => $s->format('Y-m-d'),
+        'end' => $e->format('Y-m-d'),
+        'label' => $wholeMonth ? $s->format('F Y') : $s->format('j M') . ' – ' . $e->format('j M Y'),
+        'current' => $today >= $s && $today <= $e,
+        'days_left' => $today >= $s && $today <= $e ? (int)$today->diff($e)->days + 1 : 0,
+    ];
+}
+
+/** code => 'always' | 'never' for the logged-in person */
+function alert_prefs(): array|stdClass
+{
+    $out = [];
+    foreach (q('SELECT code, mode FROM ingredient_alerts WHERE user_id = ? ORDER BY created_at', [me()]) as $r) {
+        $out[$r['code']] = $r['mode'];
+    }
+    return $out ?: new stdClass();   // {} in JSON when empty
+}
+
+function period_spent(array $period, string $kind = 'groceries'): float
+{
+    return (float)q('SELECT COALESCE(SUM(total), 0) FROM trips WHERE user_id = ? AND kind = ? AND trip_date BETWEEN ? AND ?',
+        [me(), $kind, $period['start'], $period['end']])->fetchColumn();
+}
+
 function month_spent(string $month, string $kind = 'groceries'): float
 {
     return (float)q("SELECT COALESCE(SUM(total), 0) FROM trips WHERE user_id = ? AND kind = ? AND DATE_FORMAT(trip_date, '%Y-%m') = ?", [me(), $kind, $month])->fetchColumn();
@@ -396,7 +463,7 @@ function plan_entries(string $from, string $to): array
 
 function fridge_list(): array
 {
-    $rows = q('SELECT f.*, r.servings FROM fridge f LEFT JOIN recipes r ON r.id = f.recipe_id WHERE f.user_id = ? AND f.portions > 0 ORDER BY f.cooked_on, f.id', [me()])->fetchAll();
+    $rows = q("SELECT f.*, r.servings FROM fridge f LEFT JOIN recipes r ON r.id = f.recipe_id WHERE f.user_id = ? AND f.portions > 0 ORDER BY f.location = 'freezer', f.cooked_on, f.id", [me()])->fetchAll();
     $out = [];
     $today = new DateTimeImmutable('today');
     foreach ($rows as $r) {
@@ -409,7 +476,16 @@ function fridge_list(): array
             'cost_per_portion' => $r['cost_per_portion'] === null ? null : (float)$r['cost_per_portion'],
             'cooked_on' => $r['cooked_on'],
             'age_days' => (int)$today->diff(new DateTimeImmutable($r['cooked_on']))->days,
+            'location' => $r['location'],
+            'moved_on' => $r['moved_on'],
+            // fridge: 3 days from cooking, or 2 days from thawing; freezer: 3 months
+            'use_by' => $r['location'] === 'freezer'
+                ? (new DateTimeImmutable($r['moved_on'] ?? $r['cooked_on']))->modify('+90 days')->format('Y-m-d')
+                : ($r['moved_on'] ? (new DateTimeImmutable($r['moved_on']))->modify('+2 days')->format('Y-m-d')
+                    : (new DateTimeImmutable($r['cooked_on']))->modify('+3 days')->format('Y-m-d')),
         ];
+        $last = count($out) - 1;
+        $out[$last]['days_left'] = (int)$today->diff(new DateTimeImmutable($out[$last]['use_by']))->format('%r%a');
     }
     return $out;
 }
@@ -662,7 +738,10 @@ try {
                 ], q('SELECT id, display_name, protein_target_g, kj_target FROM users WHERE id = ?', [$uid])->fetchAll()),
                 'stores' => q('SELECT id, name FROM stores WHERE user_id = ? ORDER BY name', [$uid])->fetchAll(),
                 'budget' => (float)user_setting('monthly_budget', '0'),
-                'spent' => month_spent($month),
+                'spent' => period_spent(pay_period()),
+                'period' => pay_period(),
+                'payday' => (int)user_setting('payday', '1'),
+                'alerts' => alert_prefs(),
                 'takeaway_weekly' => (float)user_setting('takeaway_weekly', '100'),
                 'label_reader' => (string)config('anthropic_key', '') !== '',
                 'month' => $month,
@@ -866,7 +945,8 @@ try {
             $lastShop = q("SELECT MAX(trip_date) FROM trips WHERE user_id = ? AND kind = 'groceries'", [$uid])->fetchColumn();
             out([
                 'items' => $items,
-                'spent' => month_spent(date('Y-m')),
+                'spent' => period_spent(pay_period()),
+                'period' => pay_period(),
                 'budget' => (float)user_setting('monthly_budget', '0'),
                 'takeaway' => takeaway_week(),
                 'fridge' => fridge_list(),
@@ -957,7 +1037,7 @@ try {
             }
             q('DELETE FROM list_items WHERE user_id = ? AND checked = 1', [$uid]);
             db()->commit();
-            out(['total' => $total, 'estimate' => round($estimate, 2), 'spent' => month_spent(substr($date, 0, 7))]);
+            out(['total' => $total, 'estimate' => round($estimate, 2), 'spent' => period_spent(pay_period())]);
 
         // ----- recipes -----
         case 'recipes.list':
@@ -1065,6 +1145,23 @@ try {
             q('DELETE FROM fridge WHERE user_id = ? AND portions <= 0', [$uid]);
             out(['fridge' => fridge_list()]);
 
+        case 'fridge.move':
+            // freeze or thaw a batch; n portions splits them off into their own batch
+            $id = int_in($in, 'id');
+            $to = ($in['to'] ?? '') === 'freezer' ? 'freezer' : 'fridge';
+            $b = q('SELECT * FROM fridge WHERE id = ? AND user_id = ?', [$id, $uid])->fetch() ?: fail('Not found', 404);
+            $n = num_in($in, 'n', (float)$b['portions'], 0.25, 500);
+            db()->beginTransaction();
+            if ($n < (float)$b['portions'] - 1e-6) {
+                q('UPDATE fridge SET portions = portions - ? WHERE id = ?', [$n, $id]);
+                q('INSERT INTO fridge (recipe_id, name, portions, grams_per_portion, cost_per_portion, cooked_on, user_id, location, moved_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURDATE())',
+                    [$b['recipe_id'], $b['name'], $n, $b['grams_per_portion'], $b['cost_per_portion'], $b['cooked_on'], $uid, $to]);
+            } else {
+                q('UPDATE fridge SET location = ?, moved_on = CURDATE() WHERE id = ?', [$to, $id]);
+            }
+            db()->commit();
+            out(['fridge' => fridge_list()]);
+
         case 'fridge.delete':
             q('DELETE FROM fridge WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $uid]);
             out(['fridge' => fridge_list()]);
@@ -1101,7 +1198,7 @@ try {
                 }
                 $want = (float)$p['servings'];
                 $taken = 0.0;
-                foreach (q('SELECT id, portions FROM fridge WHERE user_id = ? AND recipe_id = ? AND portions > 0 ORDER BY cooked_on, id FOR UPDATE', [$uid, $p['recipe_id']])->fetchAll() as $b) {
+                foreach (q("SELECT id, portions FROM fridge WHERE user_id = ? AND recipe_id = ? AND portions > 0 ORDER BY location = 'freezer', cooked_on, id FOR UPDATE", [$uid, $p['recipe_id']])->fetchAll() as $b) {
                     if ($taken >= $want) {
                         break;
                     }
@@ -1219,10 +1316,11 @@ try {
 
         // ----- budget / trips -----
         case 'budget.get':
-            $month = preg_match('/^\d{4}-\d{2}$/', (string)($in['month'] ?? '')) ? $in['month'] : date('Y-m');
+            $period = pay_period(date_in($in, 'date', date('Y-m-d')));
+            $month = substr($period['start'], 0, 7);
             $trips = q('SELECT t.id, t.trip_date, t.total, t.estimate, t.note, t.kind, s.name store, u.display_name who
                         FROM trips t LEFT JOIN stores s ON s.id = t.store_id LEFT JOIN users u ON u.id = t.user_id
-                        WHERE t.user_id = ? AND DATE_FORMAT(t.trip_date, \'%Y-%m\') = ? ORDER BY t.trip_date DESC, t.id DESC', [$uid, $month])->fetchAll();
+                        WHERE t.user_id = ? AND t.trip_date BETWEEN ? AND ? ORDER BY t.trip_date DESC, t.id DESC', [$uid, $period['start'], $period['end']])->fetchAll();
             foreach ($trips as &$t) {
                 $t['total'] = (float)$t['total'];
                 $t['estimate'] = $t['estimate'] === null ? null : (float)$t['estimate'];
@@ -1230,17 +1328,63 @@ try {
             unset($t);
             out([
                 'month' => $month,
+                'period' => $period,
+                'payday' => (int)user_setting('payday', '1'),
+                'pay_marks' => q('SELECT paid_on FROM pay_dates WHERE user_id = ? ORDER BY paid_on DESC LIMIT 6', [$uid])->fetchAll(PDO::FETCH_COLUMN),
                 'budget' => (float)user_setting('monthly_budget', '0'),
-                'spent' => month_spent($month),
-                'eating_out' => month_spent($month, 'eating_out'),
+                'spent' => period_spent($period),
+                'eating_out' => period_spent($period, 'eating_out'),
                 'takeaway_weekly' => (float)user_setting('takeaway_weekly', '100'),
                 'aisle_order' => json_decode(user_setting('aisle_order', DEFAULT_AISLES), true) ?: [],
                 'trips' => $trips,
             ]);
 
         case 'budget.set':
-            set_user_setting('monthly_budget', number_format(num_in($in, 'monthly_budget', 0, 0, 1e7), 2, '.', ''));
-            out(['ok' => true]);
+            if (array_key_exists('monthly_budget', $in)) {
+                set_user_setting('monthly_budget', number_format(num_in($in, 'monthly_budget', 0, 0, 1e7), 2, '.', ''));
+            }
+            if (array_key_exists('payday', $in)) {
+                set_user_setting('payday', (string)(int)(num_in($in, 'payday', 1, 1, 31)));
+            }
+            out(['ok' => true, 'period' => pay_period()]);
+
+        case 'pay.mark':
+            // "I got paid today" (or on a date): starts a new pay period, e.g. early December pay
+            q('INSERT IGNORE INTO pay_dates (user_id, paid_on) VALUES (?, ?)', [$uid, date_in($in, 'date', date('Y-m-d'))]);
+            out(['period' => pay_period()]);
+
+        case 'pay.unmark':
+            q('DELETE FROM pay_dates WHERE user_id = ? AND paid_on = ?', [$uid, date_in($in, 'date')]);
+            out(['period' => pay_period()]);
+
+        case 'alerts.set':
+            // mode 'always' | 'never' | null (back to normal) for an E-number, a group or a word
+            $code = mb_strtolower(trim((string)($in['code'] ?? '')));
+            $code = preg_replace('/^e\s*-?\s*(\d)/u', 'e$1', $code);
+            if ($code === '' || mb_strlen($code) > 40) {
+                fail('What should the alert look for?');
+            }
+            $mode = $in['mode'] ?? null;
+            if ($mode === null || $mode === '') {
+                q('DELETE FROM ingredient_alerts WHERE user_id = ? AND code = ?', [$uid, $code]);
+            } elseif (in_array($mode, ['always', 'never'], true)) {
+                q('INSERT INTO ingredient_alerts (user_id, code, mode) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE mode = VALUES(mode)', [$uid, $code, $mode]);
+            } else {
+                fail('Bad mode');
+            }
+            out(['alerts' => alert_prefs()]);
+
+        case 'list.swap':
+            // replace the open list lines for one product with another
+            $from = int_in($in, 'from');
+            $to = int_in($in, 'to');
+            $name = q('SELECT name FROM products WHERE id = ?', [$to])->fetchColumn() ?: fail('Unknown product');
+            $lines = q('SELECT id FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0', [$uid, $from])->fetchAll(PDO::FETCH_COLUMN);
+            db()->beginTransaction();
+            q('DELETE FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0', [$uid, $from]);
+            q('INSERT INTO list_items (user_id, product_id, name, qty, added_by, checked) VALUES (?, ?, ?, 1, ?, ?)', [$uid, $to, $name, $uid, !empty($in['checked']) ? 1 : 0]);
+            db()->commit();
+            out(['replaced' => count($lines)]);
 
         case 'trips.add':
             q('INSERT INTO trips (trip_date, store_id, total, note, user_id) VALUES (?, ?, ?, ?, ?)', [

@@ -132,3 +132,25 @@ A shared recipe is costed with the prices of the person looking at it.
 - **Label photos** are saved with the product (shrunk to about 150 KB) and only shown to logged-in users.
 - **Reading labels from photos (optional):** add `'anthropic_key' => 'sk-ant-…'` to `app/config.php`. Each photo is then read by Claude (`claude-haiku-5-5`, about a cent per label) and the form is filled in for you to check. Leave the key out and photos are only kept for reference.
 - **Weighed meat and deli barcodes** (13 digits starting with 2) are shop labels holding a price, not a product, so the app asks which product it is.
+
+## Ingredient alerts, swaps, freezer and pay months
+
+- **Product screen** (tap a product, or scan one from the Products tab):
+  - alerts in plain words
+  - Nutri-Score, fat/sat fat/sugar/salt traffic lights and processing level (NOVA)
+  - the full nutrition table
+  - the ingredients as chips, most serious first
+  - the best swap
+  - a "we don't know what's in this yet" card when nothing is known, because unknown isn't the same as clean
+- **Ingredient X-ray:** the ingredient list with additives highlighted. Tap one for what it is and why it's flagged, then choose **Always alert me** or **Don't flag this**.
+- **Alert levels:**
+  - red: a regulator acts on it (the six EU-warning colours, E171)
+  - amber: keep it occasional (nitrite curing salts)
+  - bell: your own alerts
+- **Ingredient alerts** (per person): add E-numbers or words (peanut, gluten…), switch on groups (sweeteners, EU-warning colours, nitrites, sulphites, MSG), and remove items from either list.
+- **Scanning in the shop:** a product with an alert shows why, its nutrition and a swap, then Take the swap / Buy anyway / Don't alert me again.
+- **Swaps:** products from the same aisle with no alerts, ranked by cheapest protein or healthiest, compared on the same amount of protein. "Swap on my list" replaces the item.
+- **Shopping list:** Nutri-Score letters, a coloured edge on items with alerts, and a summary of what swapping would save.
+- **Freezer:** freeze or thaw cooked portions. Fridge portions warn on day 3 (day 2 after thawing). Eating a planned meal takes from the fridge first.
+- **Pay months:** set your payday (Budget → Settings). Use "I got paid today" for early December pay; that date replaces the usual payday nearby.
+- **Logging a takeaway** shows what's ready in the fridge and how many prepped meals the takeaway equals.
