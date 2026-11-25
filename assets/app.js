@@ -430,23 +430,15 @@ async function route(opts) {
   if (keep) window.scrollTo(0, y);
 }
 
-/* ---------- keep the dock on the bottom edge ----------
- * iOS 26 home-screen apps can leave a band at the bottom as if Safari's toolbar were still there:
- * the window is shorter than the screen and fixed bars sit above that band. Measure the band and
- * push the bars down into it. While typing, the dock hides and the add bar sits on the keyboard. */
+/* ---------- dock while typing ----------
+ * While typing, the dock hides and the add bar sits on the keyboard. */
 const isTyping = () => { const a = document.activeElement; return !!a && (['TEXTAREA', 'SELECT'].includes(a.tagName) || (a.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit'].includes(a.type))); };
 function fitDock() {
   const typing = isTyping();
   document.body.classList.toggle('typing', typing);
-  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
-  let gap = 0;
-  if (standalone && !typing) {
-    const portrait = window.innerHeight >= window.innerWidth;
-    const screenH = portrait ? Math.max(screen.height, screen.width) : Math.min(screen.height, screen.width);
-    gap = Math.round(screenH - window.innerHeight);
-    if (gap < 2 || gap > 90) gap = 0;   // nothing to fix, or the keyboard/something else is up
-  }
-  document.documentElement.style.setProperty('--vp-gap', `${gap}px`);
+  // No position correction: iOS clips fixed bars inside its phantom band, so pushing the dock down cut it off.
+  // The page height fix in app.css avoids the band instead.
+  document.documentElement.style.setProperty('--vp-gap', '0px');
 }
 ['resize', 'orientationchange', 'pageshow'].forEach((ev) => window.addEventListener(ev, fitDock));
 window.visualViewport?.addEventListener('resize', fitDock);
