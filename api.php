@@ -472,26 +472,50 @@ function recipes_with_costs(?int $onlyId = null): array
  * Paydays are the usual day of the month (user setting 'payday', default the 1st), except where a marked
  * pay date falls within 10 days of it (early December pay, a moved payday): the marked date wins.
  */
+/** South African public holidays in a year (a holiday on a Sunday moves to the Monday). */
+function za_holidays(int $y): array
+{
+    static $cache = [];
+    if (isset($cache[$y])) {
+        return $cache[$y];
+    }
+    // Easter Sunday (anonymous Gregorian algorithm), for Good Friday and Family Day
+    $a = $y % 19; $b = intdiv($y, 100); $c = $y % 100; $d = intdiv($b, 4); $e = $b % 4;
+    $f = intdiv($b + 8, 25); $g = intdiv($b - $f + 1, 3); $h = (19 * $a + $b - $d - $g + 15) % 30;
+    $i = intdiv($c, 4); $k = $c % 4; $l = (32 + 2 * $e + 2 * $i - $h - $k) % 7; $m = intdiv($a + 11 * $h + 22 * $l, 451);
+    $n = $h + $l - 7 * $m + 114;
+    $easter = new DateTimeImmutable(sprintf('%04d-%02d-%02d', $y, intdiv($n, 31), $n % 31 + 1));
+    $days = [$easter->modify('-2 days')->format('Y-m-d'), $easter->modify('+1 day')->format('Y-m-d')];
+    foreach (['01-01', '03-21', '04-27', '05-01', '06-16', '08-09', '09-24', '12-16', '12-25', '12-26'] as $md) {
+        $dt = new DateTimeImmutable("$y-$md");
+        $days[] = $dt->format('Y-m-d');
+        if ($dt->format('N') === '7') {
+            $days[] = $dt->modify('+1 day')->format('Y-m-d');
+        }
+    }
+    return $cache[$y] = array_flip($days);
+}
+
+/** The day pay actually lands: your payday, or the working day before when that's a weekend or public holiday. */
+function pay_day_in(int $y, int $mo, int $day): DateTimeImmutable
+{
+    $first = new DateTimeImmutable(sprintf('%04d-%02d-01', $y, $mo));
+    $d = $first->setDate($y, $mo, min($day, (int)$first->format('t')));
+    while ((int)$d->format('N') >= 6 || isset(za_holidays((int)$d->format('Y'))[$d->format('Y-m-d')])) {
+        $d = $d->modify('-1 day');
+    }
+    return $d;
+}
+
+/** The pay month containing $date: from one payday to the day before the next. Nothing anyone taps can move it. */
 function pay_period(?string $date = null): array
 {
     $d = new DateTimeImmutable($date ?? 'today');
     $day = max(1, min(31, (int)user_setting('payday', '1')));
-    $marks = q('SELECT paid_on FROM pay_dates WHERE user_id = ? AND paid_on BETWEEN ? AND ?', [
-        kid(), $d->modify('-100 days')->format('Y-m-d'), $d->modify('+100 days')->format('Y-m-d'),
-    ])->fetchAll(PDO::FETCH_COLUMN);
-    $starts = $marks;
+    $starts = [];
     for ($i = -3; $i <= 3; $i++) {
         $m = $d->modify(sprintf('first day of %+d month', $i));
-        $usual = $m->setDate((int)$m->format('Y'), (int)$m->format('n'), min($day, (int)$m->format('t')));
-        $replaced = false;
-        foreach ($marks as $mk) {
-            if (abs((new DateTimeImmutable($mk))->getTimestamp() - $usual->getTimestamp()) <= 10 * 86400) {
-                $replaced = true;
-            }
-        }
-        if (!$replaced) {
-            $starts[] = $usual->format('Y-m-d');
-        }
+        $starts[] = pay_day_in((int)$m->format('Y'), (int)$m->format('n'), $day)->format('Y-m-d');
     }
     $starts = array_values(array_unique($starts));
     sort($starts);
@@ -1710,7 +1734,6 @@ try {
                 'month' => $month,
                 'period' => $period,
                 'payday' => (int)user_setting('payday', '1'),
-                'pay_marks' => q('SELECT paid_on FROM pay_dates WHERE user_id = ? ORDER BY paid_on DESC LIMIT 6', [$kid])->fetchAll(PDO::FETCH_COLUMN),
                 'budget' => (float)user_setting('monthly_budget', '0'),
                 'spent' => period_spent($period),
                 'eating_out' => period_spent($period, 'eating_out'),
@@ -1727,15 +1750,6 @@ try {
                 set_user_setting('payday', (string)(int)(num_in($in, 'payday', 1, 1, 31)));
             }
             out(['ok' => true, 'period' => pay_period()]);
-
-        case 'pay.mark':
-            // "I got paid today" (or on a date): starts a new pay period, e.g. early December pay
-            q('INSERT IGNORE INTO pay_dates (user_id, paid_on) VALUES (?, ?)', [$kid, date_in($in, 'date', date('Y-m-d'))]);
-            out(['period' => pay_period()]);
-
-        case 'pay.unmark':
-            q('DELETE FROM pay_dates WHERE user_id = ? AND paid_on = ?', [$kid, date_in($in, 'date')]);
-            out(['period' => pay_period()]);
 
         case 'alerts.set':
             // mode 'always' | 'never' | null (back to normal) for an E-number, a group or a word
