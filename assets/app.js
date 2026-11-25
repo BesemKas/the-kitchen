@@ -343,6 +343,7 @@ function itemPrice(it) {
 /* ---------- header pill ---------- */
 function updatePill() {
   const left = S.budget - S.spent;
+  if (!(S.budget > 0)) { pill.textContent = 'Set budget'; pill.className = 'pill'; return; }
   pill.textContent = `${money(left)} left`;
   pill.className = 'pill' + (left < 0 ? ' bad' : left < S.budget * 0.2 ? ' warn' : '');
 }
@@ -434,7 +435,8 @@ async function renderList() {
   const where = shopCompare(lines.map(({ it }) => it));
 
   view.innerHTML = `
-    <section class="ring-card">
+    ${budget > 0 ? '' : `<a class="banner" href="#budget"><b>Set your monthly grocery budget</b><span class="small">Budget tab → Settings. Then this shows what's left.</span></a>`}
+    <section class="ring-card ${budget > 0 ? '' : 'hidden'}">
       ${ringSvg(spent, listTotal, budget)}
       <div class="ring-text">
         <span class="small muted">Left for ${esc(monthName)}</span>
@@ -1671,15 +1673,15 @@ async function renderPlan() {
   };
 }
 
-/** What one person eats on a day, assuming each planned serving is one person's portion. */
+/** What you eat on a day: one portion of each planned meal (extra servings are for someone else or leftovers). */
 function perPersonHtml(dayEntries) {
-  const people = Math.max(1, S.users.length);
-  const protein = dayEntries.reduce((s, e) => s + e.protein_g, 0) / people;
-  const kj = dayEntries.reduce((s, e) => s + e.energy_kj, 0) / people;
+  const portion = (e, k) => e[k] / Math.max(1, e.servings || 1);
+  const protein = dayEntries.reduce((s, e) => s + portion(e, 'protein_g'), 0);
+  const kj = dayEntries.reduce((s, e) => s + portion(e, 'energy_kj'), 0);
   const me = S.users.find((u) => u.id === S.user.id) || {};
   const bar = (v, t) => (t ? `<div class="meter ${v < t * 0.8 ? 'warn' : ''}"><div data-w="${Math.min(100, (v / t) * 100)}"></div></div>` : '');
   return `<div class="stack tight small">
-      <div class="row between"><span class="muted">Each person${people > 1 ? ` (of ${people})` : ''}</span><span><b>${Math.round(protein)} g</b> protein · <b>${Math.round(kj).toLocaleString('en-ZA')}</b> kJ</span></div>
+      <div class="row between"><span class="muted">You eat</span><span><b>${Math.round(protein)} g</b> protein · <b>${Math.round(kj).toLocaleString('en-ZA')}</b> kJ</span></div>
       ${me.protein_target_g ? `<div class="row between"><span class="muted">Your protein target</span><span>${me.protein_target_g} g</span></div>${bar(protein, me.protein_target_g)}` : ''}
       ${me.kj_target ? `<div class="row between"><span class="muted">Your kJ target</span><span>${me.kj_target.toLocaleString('en-ZA')} kJ</span></div>${bar(kj, me.kj_target)}` : ''}
       ${!me.protein_target_g && !me.kj_target ? '<span class="muted">Set your daily targets on the Budget tab.</span>' : ''}
@@ -1694,7 +1696,7 @@ function planWizard(start, recipes, existing) {
   const valid = (ids) => (ids || []).filter((id) => recipes.some((r) => r.id === id));
   const st = {
     days: saved.dayMask ? days.filter((_, i) => saved.dayMask[i]) : [...days],
-    people: saved.people || Math.max(1, S.users.length),
+    people: saved.people || 1,
     breakfast: valid([saved.breakfast])[0] || null,
     lunch: valid(saved.lunch),
     dinner: valid(saved.dinner),
@@ -1730,7 +1732,7 @@ function planWizard(start, recipes, existing) {
       <div class="stack tight"><span class="small muted">Days</span>
         <div class="daystrip">${days.map((d) => { const dt = parseIso(d); const on = st.days.includes(d); return `<button type="button" class="daybtn ${on ? 'active' : 'empty'}" data-day="${d}" aria-pressed="${on}"><span class="d">${'MTWTFSS'[(dt.getDay() + 6) % 7]}</span><b>${dt.getDate()}</b></button>`; }).join('')}</div>
       </div>
-      <div class="row between"><span>People eating</span><div class="qty big"><button type="button" data-act="p-">−</button><span>${st.people}</span><button type="button" data-act="p+">+</button></div></div>
+      <div class="row between"><span>Portions per meal</span><div class="qty big"><button type="button" data-act="p-">−</button><span>${st.people}</span><button type="button" data-act="p+">+</button></div></div>
       <label>Breakfast <select id="wzB"><option value="">Skip breakfast</option>${recipes.map((r) => `<option value="${r.id}" ${r.id === st.breakfast ? 'selected' : ''}>${esc(r.name)} (${money(r.cost_per_serving)})</option>`).join('')}</select></label>
       <div class="stack tight"><span class="small muted">Lunch: pick one or more to rotate</span><div class="chips wrap">${chips('lunch')}</div></div>
       <div class="stack tight"><span class="small muted">Dinner: pick one or more to rotate</span><div class="chips wrap">${chips('dinner')}</div></div>
@@ -1859,7 +1861,7 @@ async function planAddSheet(date, recipeId = null) {
       <label>Day <input name="date" type="date" value="${date}"></label>
       <label>Meal <select name="slot">${SLOTS.map((s) => `<option value="${s}">${s[0].toUpperCase() + s.slice(1)}</option>`).join('')}</select></label>
       <label>Recipe <select name="recipe_id">${S.recipes.map((r) => `<option value="${r.id}" ${r.id === recipeId ? 'selected' : ''}>${esc(r.name)} (${money(r.cost_per_serving)}/serving)</option>`).join('')}</select></label>
-      <label>Servings <input name="servings" type="number" inputmode="decimal" min="0.25" step="0.25" value="${S.users.length > 1 ? 2 : 1}"></label>
+      <label>Servings <input name="servings" type="number" inputmode="decimal" min="0.25" step="0.25" value="1"></label>
       <button class="btn primary block">Add</button>
     </form>`);
   sheetBody.onsubmit = async (e) => {
@@ -1924,7 +1926,7 @@ async function renderBudget() {
     <section class="card stack">
       <h2>Settings</h2>
       <form class="row" id="budgetForm"><label class="grow">Monthly grocery budget (R) <input name="monthly_budget" type="number" inputmode="decimal" step="0.01" min="0" value="${b.budget}"></label><button class="btn">Save</button></form>
-      <form class="stack" id="targets"><span class="small muted">My daily targets (each of you sets your own)</span>
+      <form class="stack" id="targets"><span class="small muted">My daily targets</span>
         <div class="grid2">
           <label>Protein (g) <input name="protein" type="number" inputmode="numeric" min="0" value="${(S.users.find((u) => u.id === S.user.id) || {}).protein_target_g ?? ''}"></label>
           <label>Energy (kJ) <input name="kj" type="number" inputmode="numeric" min="0" value="${(S.users.find((u) => u.id === S.user.id) || {}).kj_target ?? ''}"></label>

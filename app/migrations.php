@@ -75,6 +75,46 @@ const MIGRATIONS = [
             INDEX (created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
     ],
+    7 => [
+        // Everyone gets their own app: own list, shops, prices, plan, fridge, pantry, budget and history.
+        // Only recipes (and the product facts recipes are built from) stay shared.
+        // Everything that exists now goes to Besem's account (falls back to the first account).
+        "SET @owner = COALESCE((SELECT id FROM users WHERE username IN ('besem', 'besemkas') ORDER BY id LIMIT 1), (SELECT MIN(id) FROM users))",
+
+        "CREATE TABLE user_settings (
+            user_id INT UNSIGNED NOT NULL,
+            k VARCHAR(40) NOT NULL,
+            v TEXT NOT NULL,
+            PRIMARY KEY (user_id, k),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        "INSERT INTO user_settings (user_id, k, v) SELECT @owner, k, v FROM settings WHERE k IN ('monthly_budget', 'takeaway_weekly', 'aisle_order') AND @owner IS NOT NULL",
+        "DELETE FROM settings WHERE k IN ('monthly_budget', 'takeaway_weekly', 'aisle_order')",
+
+        // shops belong to someone; shop names only need to be unique per person
+        "ALTER TABLE stores ADD COLUMN user_id INT UNSIGNED NULL AFTER id",
+        "UPDATE stores SET user_id = @owner",
+        "ALTER TABLE stores DROP INDEX name, ADD UNIQUE KEY user_name (user_id, name), ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+
+        "ALTER TABLE list_items ADD COLUMN user_id INT UNSIGNED NULL AFTER id, ADD INDEX (user_id), ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+        "UPDATE list_items SET user_id = @owner",
+
+        "ALTER TABLE plan ADD COLUMN user_id INT UNSIGNED NULL AFTER id, ADD INDEX user_date (user_id, plan_date), ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+        "UPDATE plan SET user_id = @owner",
+
+        "UPDATE fridge SET user_id = @owner",
+        "UPDATE trips SET user_id = @owner",
+
+        // pantry and 'bought before' are per person
+        "ALTER TABLE pantry ADD COLUMN user_id INT UNSIGNED NULL FIRST, ADD COLUMN bought_count INT UNSIGNED NOT NULL DEFAULT 0, ADD COLUMN last_bought DATE NULL, ADD INDEX (product_id)",
+        "UPDATE pantry SET user_id = @owner",
+        "DELETE FROM pantry WHERE user_id IS NULL",
+        "ALTER TABLE pantry DROP PRIMARY KEY, MODIFY user_id INT UNSIGNED NOT NULL, ADD PRIMARY KEY (user_id, product_id), ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE",
+        "INSERT INTO pantry (user_id, product_id, amount, bought_count, last_bought)
+            SELECT @owner, id, 0, bought_count, last_bought FROM products WHERE bought_count > 0 AND @owner IS NOT NULL
+            ON DUPLICATE KEY UPDATE bought_count = VALUES(bought_count), last_bought = VALUES(last_bought)",
+        "ALTER TABLE products DROP COLUMN bought_count, DROP COLUMN last_bought",
+    ],
 ];
 
 function schema_version(): int
