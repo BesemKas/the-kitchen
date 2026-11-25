@@ -1967,10 +1967,12 @@ async function renderRecipes() {
       </article>`;
   };
   const mine = recipes.filter((r) => r.mine);
-  const others = recipes.filter((r) => !r.mine);
+  const home = recipes.filter((r) => !r.mine && r.household);
+  const others = recipes.filter((r) => !r.mine && !r.household);
   view.innerHTML = `
     <button class="btn primary block" data-act="new">＋ New recipe</button>
     ${mine.length ? mine.map(card).join('') : '<p class="empty">No recipes of your own yet. Add the meals you prep, or copy one below and make it yours.</p>'}
+    ${home.length ? `<h2 class="section-h">From ${esc(S.household ? S.household.name : 'your household')}</h2><p class="small muted">Plan and cook from these. Only the person who added one can change it.</p>${home.map(card).join('')}` : ''}
     ${others.length ? `<h2 class="section-h">Shared by others</h2><p class="small muted">Cook, plan and shop from these. Copy one to change it.</p>${others.map(card).join('')}` : ''}`;
   view.onclick = (e) => {
     if (e.target.closest('[data-act=new]')) return recipeEditor({ id: null, name: '', servings: 4, instructions: '', prep_minutes: null, cook_minutes: null, items: [], steps: [] });
@@ -2730,6 +2732,7 @@ async function renderBudget() {
       <div class="meter ${left < 0 ? 'bad' : left < b.budget * 0.2 ? 'warn' : ''}"><div id="bMeter"></div></div>
       ${isCurrent && left > 0 ? `<p class="small muted">${daysLeft} day${daysLeft === 1 ? '' : 's'} to payday, so about ${money(left / daysLeft)} a day or ${money((left / daysLeft) * 7)} a week.</p>` : ''}
       ${left < 0 ? `<p class="small bad-text">Over budget by ${money(-left)}.</p>` : ''}
+      ${S.household && S.household.mode === 'shared' ? `<p class="small muted">Shared kitchen: ${esc(S.household.members.map((m) => m.display_name).join(', '))} shop from this budget. Takeaways below are yours alone.</p>` : ''}
     </section>
 
     <section class="card stack">
@@ -2773,6 +2776,9 @@ async function renderBudget() {
       </div>
       <p class="small muted">Logged in as ${esc(S.user.display_name)}.</p>
       <div class="row"><button class="btn small grow" data-act="password">Change password</button><button class="btn small grow" data-act="logout">Log out</button></div>
+      <div class="stack tight"><span class="small muted">Household</span>
+        <button class="btn block" data-act="household">${S.household ? `${esc(S.household.name)} · ${S.household.mode === 'shared' ? 'shared kitchen' : 'separate kitchens'} · ${S.household.members.length} ${S.household.members.length === 1 ? 'person' : 'people'}` : 'Start a household or invite someone'}</button>
+      </div>
       <div class="stack tight"><span class="small muted">Your data</span>
         <div class="row"><button class="btn small grow" data-act="rename">Change my name</button><button class="btn small grow" data-act="export">Download my data</button></div>
         <div class="row"><a class="btn small grow" href="./?privacy">How your data is kept</a><button class="btn small grow danger" data-act="delete-account">Delete my account</button></div>
@@ -2841,6 +2847,7 @@ async function renderBudget() {
         if (name && name.trim()) { await api('account.name', { display_name: name.trim() }); S.user.display_name = name.trim(); toast('Name saved'); }
         return;
       }
+      if (t.dataset.act === 'household') return householdSheet();
       if (t.dataset.act === 'export') {
         const { export: data } = await api('account.export');
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -2982,17 +2989,140 @@ async function adminSheet() {
   draw(r.users.map((x) => ({ ...x, id: Number(x.id) })), r.signups_open);
 }
 
+/* ---------- households ---------- */
+const unsynced = () => (queue.length ? `${queue.length} change${queue.length === 1 ? " hasn't" : "s haven't"} synced yet. Wait for signal so they sync first.` : '');
+
+/** After a household change you may be in a different kitchen: forget this phone's offline copy and start fresh. */
+function reloadKitchen(msg) {
+  Object.keys(localStorage).filter((k) => k.startsWith('kb:') && k !== 'kb:queue').forEach((k) => localStorage.removeItem(k));
+  store.set('store', null);
+  store.set('budgetDate', null);
+  if (msg) store.set('flash', msg);
+  history.replaceState(null, '', '#list');
+  location.reload();
+}
+
+async function householdSheet() {
+  let h = S.household;
+  try { h = (await api('household.get')).household; S.household = h; } catch { /* offline: show what we know */ }
+  if (!h) {
+    openSheet(`${sheetHead('Household')}
+      <p>Live with someone? Start a household and invite them. You'll see each other's recipes, and you can choose to share one kitchen: one list, pantry, meal plan, fridge and grocery budget.</p>
+      <form class="stack" id="hhNew"><label>Household name <input name="name" required maxlength="60" placeholder="e.g. Our flat"></label><button class="btn primary block">Start a household</button></form>
+      <p class="small muted">Got an invite link? Open it on this phone and you'll be asked to join.</p>`);
+    sheetBody.onsubmit = async (e) => {
+      e.preventDefault();
+      try { S.household = (await api('household.create', { name: e.target.name.value.trim() })).household; toast('Household started. Now invite someone'); householdSheet(); } catch (er) { fail(er); }
+    };
+    return;
+  }
+  const owner = h.role === 'owner';
+  const shared = h.mode === 'shared';
+  const alone = h.members.length === 1;
+  openSheet(`${sheetHead(h.name)}
+    <div class="stack tight"><span class="small muted">Kitchen</span>
+      <div class="seg" role="group" aria-label="How the household runs its kitchen">
+        <button type="button" data-mode="separate" aria-pressed="${!shared}" class="${!shared ? 'on' : ''}">Separate</button>
+        <button type="button" data-mode="shared" aria-pressed="${shared}" class="${shared ? 'on' : ''}">Shared kitchen</button>
+      </div>
+      <p class="small muted">${shared
+        ? 'One shopping list, pantry, set of shops and prices, meal plan, fridge and grocery budget for everyone here. Takeaways, ingredient alerts and targets stay your own.'
+        : "Everyone keeps their own list, plan and budget. You see each other's recipes; only the person who added a recipe can change it."}</p>
+    </div>
+    <div class="stack tight"><span class="small muted">People</span>
+      <ul class="list card flush">${h.members.map((m) => `<li data-id="${m.id}"><span class="grow">${esc(m.display_name)}${m.id === S.user.id ? ' <span class="muted small">(you)</span>' : ''}${m.role === 'owner' ? ' <span class="tag">runs it</span>' : ''}</span>${owner && m.id !== S.user.id ? '<button type="button" class="btn small ghost" data-act="remove">Remove</button>' : ''}</li>`).join('')}</ul>
+      <button type="button" class="btn primary block" data-act="invite">Invite someone</button>
+      <p class="small muted">An invite link works once, for 7 days. Send it on WhatsApp; they can sign up from it.</p>
+    </div>
+    <div class="row"><button type="button" class="btn small grow" data-act="rename">Rename</button><button type="button" class="btn small grow danger" data-act="leave">Leave household</button></div>`);
+  sheetBody.onclick = async (e) => {
+    const t = e.target.closest('[data-act],[data-mode]');
+    if (!t) return;
+    try {
+      if (t.dataset.mode) {
+        const mode = t.dataset.mode;
+        if (mode === h.mode) return;
+        if (unsynced()) return toast(unsynced());
+        const ok = confirm(mode === 'shared'
+          ? `Share one kitchen with everyone in ${h.name}?\n\nThe first time a household shares, its kitchen starts as a copy of yours: shops and prices, pantry, list, plan from today, fridge, budget and payday. Your own kitchen is kept, and comes back if you switch to Separate or leave.`
+          : 'Go back to separate kitchens?\n\nEveryone returns to their own list, plan and budget. The shared kitchen is kept in case you switch back.');
+        if (!ok) return;
+        await api('household.mode', { mode });
+        return reloadKitchen(mode === 'shared' ? 'Kitchen shared' : 'Back to your own kitchen');
+      }
+      if (t.dataset.act === 'invite') {
+        const { token } = await api('household.invite');
+        const link = `${location.origin}${location.pathname}?join=${token}`;
+        const text = `Join ${h.name} on Kitchen Budget (the link works once, for 7 days): ${link}`;
+        if (navigator.share) { try { await navigator.share({ title: 'Kitchen Budget invite', text }); return; } catch { /* cancelled or not allowed: copy instead */ } }
+        try { await navigator.clipboard.writeText(link); toast('Invite link copied. Send it to them'); } catch { prompt('Copy this link and send it:', link); }
+        return;
+      }
+      if (t.dataset.act === 'rename') {
+        const name = prompt('Household name', h.name);
+        if (name && name.trim()) { S.household = (await api('household.rename', { name: name.trim() })).household; householdSheet(); }
+        return;
+      }
+      if (t.dataset.act === 'remove') {
+        const m = h.members.find((x) => x.id === Number(t.closest('li').dataset.id));
+        if (!confirm(`Remove ${m.display_name} from ${h.name}? They go back to their own kitchen. What they added to a shared kitchen stays here.`)) return;
+        S.household = (await api('household.remove', { user_id: m.id })).household;
+        return householdSheet();
+      }
+      if (t.dataset.act === 'leave') {
+        if (shared && unsynced()) return toast(unsynced());
+        const ok = confirm(alone
+          ? `You're the only one in ${h.name}. Leaving closes it${shared ? ', and deletes its shared kitchen (list, plan, budget and shops logged there)' : ''}. Your own kitchen is kept.`
+          : `Leave ${h.name}?${shared ? ' You go back to your own kitchen; what you added to the shared one stays with the household.' : ''} Your recipes leave with you.`);
+        if (!ok) return;
+        await api('household.leave');
+        return reloadKitchen(`You left ${h.name}`);
+      }
+    } catch (er) { fail(er); }
+  };
+}
+
+/** Opened from an invite link (?join=…), after logging in or signing up. */
+async function joinSheet(token, isNew) {
+  let p;
+  try { p = await api('household.preview', { token }); } catch (er) { fail(er); if (isNew) welcomeSheet(); return; }
+  if (p.same) { toast(`You're already in ${p.household}`); return; }
+  let joined = false;
+  openSheet(`${sheetHead('Join a household')}
+    <p><b>${esc(p.inviter || 'Someone')}</b> invited you to join <b>${esc(p.household)}</b> (${p.members} ${p.members === 1 ? 'person' : 'people'} so far).</p>
+    <p class="small muted">You'll see each other's recipes. If the household shares its kitchen, you'll use its list, plan and budget; your own are kept in case you leave.</p>
+    ${p.already ? "<p class=\"error\">You're already in a household. Leave it under Budget → Household first, then open the link again.</p>" : '<button type="button" class="btn primary block" data-act="join">Join</button>'}
+    <button type="button" class="btn block" data-close>Not now</button>`, () => { if (isNew && !joined) welcomeSheet(); });
+  sheetBody.onclick = async (e) => {
+    if (!e.target.closest('[data-act=join]')) return;
+    try {
+      const { household } = await api('household.join', { token });
+      joined = true;
+      if (household.mode === 'shared') return reloadKitchen(`You joined ${household.name}`);
+      S.household = household;
+      closeSheet();
+      toast(`You joined ${household.name}`);
+      route();
+      if (isNew) welcomeSheet();
+    } catch (er) { fail(er); }
+  };
+}
+
 /* ---------- start ---------- */
 (async function init() {
   try {
     const b = await api('bootstrap');
     Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader,
-      alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday, isAdmin: !!b.is_admin, signupsOpen: !!b.signups_open });
+      alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday, isAdmin: !!b.is_admin, signupsOpen: !!b.signups_open, household: b.household || null });
     const saved = store.get('store', null);
     S.storeId = S.stores.some((s) => String(s.id) === String(saved)) ? String(saved) : (S.stores[0] ? String(S.stores[0].id) : null);
     store.set('budgetDate', null);
     updatePill();
+    const flash = store.get('flash', null);
+    if (flash) { store.set('flash', null); setTimeout(() => toast(flash), 300); }
     if (location.hash === '#welcome') { history.replaceState(null, '', '#list'); route(); welcomeSheet(); return; }
+    const join = location.hash.match(/^#join=([0-9a-f]{48})(&new)?$/);
+    if (join) { history.replaceState(null, '', '#list'); route(); joinSheet(join[1], !!join[2]); return; }
     route();
   } catch (e) {
     view.innerHTML = `<p class="error">${esc(e.message)}</p>`;

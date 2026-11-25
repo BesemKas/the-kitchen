@@ -10,6 +10,34 @@ $page = isset($_GET['signup']) ? 'signup' : (isset($_GET['reset']) ? 'reset' : (
 $signupsOpen = setting('signups_open', '1') === '1';
 $formOk = fn() => hash_equals(csrf_token(), $_POST['csrf'] ?? '');
 
+// a household invite link (?join=…) is remembered through log-in or sign-up, then opened in the app
+if (isset($_GET['join']) && preg_match('/^[0-9a-f]{48}$/', (string)$_GET['join'])) {
+    $_SESSION['join'] = (string)$_GET['join'];
+    if (current_user()) {
+        unset($_SESSION['join']);
+        header('Location: ' . base_path() . '#join=' . $_GET['join']);
+        exit;
+    }
+}
+$invite = null;
+if (!empty($_SESSION['join'])) {
+    try {
+        $st = db()->prepare('SELECT h.name household, u.display_name inviter FROM household_invites i JOIN households h ON h.id = i.household_id
+                             LEFT JOIN users u ON u.id = i.invited_by WHERE i.token_hash = ? AND i.used_at IS NULL AND i.expires_at > NOW()');
+        $st->execute([hash('sha256', (string)$_SESSION['join'])]);
+        $invite = $st->fetch() ?: null;
+    } catch (PDOException $e) {
+        $invite = null;   // tables not there yet
+    }
+}
+// someone invited into a household may sign up even when sign-ups are closed
+$signupsOpen = $signupsOpen || $invite !== null;
+$after = function (string $hash = ''): string {
+    $tok = (string)($_SESSION['join'] ?? '');
+    unset($_SESSION['join']);
+    return base_path() . ($tok !== '' ? '#join=' . $tok . ($hash === '#welcome' ? '&new' : '') : $hash);
+};
+
 if (($_POST['action'] ?? '') === 'login') {
     if (!$formOk()) {
         $error = 'Form expired, try again.';
@@ -23,8 +51,9 @@ if (($_POST['action'] ?? '') === 'login') {
             if (!empty($row['disabled'])) {
                 $error = 'This account is switched off. Ask the person who runs the app.';
             } else {
+                $to = $after();
                 log_in((int)$row['id'], !empty($_POST['remember']));
-                header('Location: ' . base_path());
+                header('Location: ' . $to);
                 exit;
             }
         } else {
@@ -65,8 +94,9 @@ if (($_POST['action'] ?? '') === 'signup') {
         } else {
             db()->prepare('INSERT INTO users (username, display_name, password_hash) VALUES (?, ?, ?)')
                 ->execute([$username, $name, password_hash($pass, PASSWORD_DEFAULT)]);
+            $to = $after('#welcome');
             log_in((int)db()->lastInsertId(), true);
-            header('Location: ' . base_path() . '#welcome');
+            header('Location: ' . $to);
             exit;
         }
     }
@@ -118,18 +148,19 @@ if ($user && $page !== 'privacy') {
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
-<link rel="stylesheet" href="assets/app.css?v=15">
+<link rel="stylesheet" href="assets/app.css?v=16">
 </head>
 <?php if (!$user || $page === 'privacy'): ?>
 <body class="auth">
 <main class="card auth-card">
   <h1>Kitchen Budget</h1>
   <?php if ($error): ?><p class="error"><?= h($error) ?></p><?php endif; ?>
+  <?php if ($invite && $page !== 'privacy'): ?><p class="notice"><?= h($invite['inviter'] ?: 'Someone') ?> invited you to join the household “<?= h($invite['household']) ?>”. Log in, or create an account, and you'll be asked to join.</p><?php endif; ?>
 <?php if ($page === 'privacy'): ?>
   <h2>Your data</h2>
   <div class="stack small">
     <p>Kitchen Budget is a small personal app. It keeps what you type or scan: your username, display name, a hashed password (nobody can read it), shopping lists, shops and prices, meal plans, cooked portions, budget, takeaways, ingredient alerts and the recipes you add.</p>
-    <p><b>Who sees it:</b> only you. Product facts (names, barcodes, nutrition, label photos) are shared with everyone so a scan helps all users. Recipes are private unless you tap “Share with everyone”.</p>
+    <p><b>Who sees it:</b> only you, unless you join a household. In a household everyone sees each other's recipes and the people's names; if the household shares its kitchen, the shopping list, pantry, shops and prices, meal plan, fridge and grocery budget are shared too (your takeaways, ingredient alerts and targets stay yours). Product facts (names, barcodes, nutrition, label photos) are shared with everyone so a scan helps all users. Recipes are private unless you tap “Share with everyone”.</p>
     <p><b>Where it lives:</b> on the app's web host in a MySQL database, with nightly backups. It is never sold or shared. Barcodes are looked up on Open Food Facts; if label reading is switched on, label photos are sent to Anthropic's Claude to read the numbers.</p>
     <p><b>Your rights:</b> under Budget → Settings you can download everything the app holds about you, or delete your account and all your data.</p>
   </div>
@@ -193,7 +224,7 @@ if ($user && $page !== 'privacy') {
 <div id="sheet" class="sheet" hidden><div class="sheet-body" id="sheetBody"></div></div>
 <div id="toast" class="toast" hidden></div>
 <script src="assets/zxing-browser.min.js"></script>
-<script src="assets/app.js?v=15"></script>
+<script src="assets/app.js?v=16"></script>
 </body>
 <?php endif; ?>
 </html>

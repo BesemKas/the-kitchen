@@ -98,7 +98,7 @@ function latest_prices(?array $productIds = null): array
 {
     // only this person's shops, so prices and 'cheapest' are their own
     $sql = 'SELECT p.product_id, p.store_id, p.price, p.recorded_at FROM prices p
-            JOIN (SELECT MAX(pr.id) id FROM prices pr JOIN stores s ON s.id = pr.store_id AND s.user_id = ' . me() . ' GROUP BY pr.product_id, pr.store_id) m ON m.id = p.id';
+            JOIN (SELECT MAX(pr.id) id FROM prices pr JOIN stores s ON s.id = pr.store_id AND s.user_id = ' . kid() . ' GROUP BY pr.product_id, pr.store_id) m ON m.id = p.id';
     $params = [];
     if ($productIds !== null) {
         if (!$productIds) {
@@ -137,10 +137,110 @@ function own_recipe(int $id): void
     }
 }
 
-/** The logged-in person. Everything except recipes and product facts belongs to one person. */
+/** The logged-in person: their recipes, takeaways, alerts and targets. */
 function me(): int
 {
     return (int)$GLOBALS['uid'];
+}
+
+/**
+ * Whose kitchen this request works on (list, pantry, shops and prices, plan, fridge, groceries budget).
+ * That's you, unless your household runs a shared kitchen: then it's the household's hidden kitchen account.
+ */
+function kid(): int
+{
+    return (int)($GLOBALS['kid'] ?? $GLOBALS['uid']);
+}
+
+/** Settings that belong to the kitchen; everything else (takeaway allowance…) stays personal. */
+const KITCHEN_SETTINGS = ['monthly_budget', 'payday', 'aisle_order'];
+
+/** Your household and your role in it, or null. */
+function my_household(int $uid): ?array
+{
+    $h = q('SELECT h.*, m.role FROM household_members m JOIN households h ON h.id = m.household_id WHERE m.user_id = ?', [$uid])->fetch();
+    return $h ?: null;
+}
+
+function kitchen_of(int $uid): int
+{
+    $h = my_household($uid);
+    return $h && $h['mode'] === 'shared' ? (int)$h['kitchen_user_id'] : $uid;
+}
+
+/** People in your household (you included), for recipe sharing. */
+function household_people(int $uid): array
+{
+    return array_map('intval', q('SELECT m2.user_id FROM household_members m1 JOIN household_members m2 ON m2.household_id = m1.household_id WHERE m1.user_id = ?', [$uid])->fetchAll(PDO::FETCH_COLUMN));
+}
+
+function household_view(int $uid): ?array
+{
+    $h = my_household($uid);
+    if (!$h) {
+        return null;
+    }
+    return [
+        'id' => (int)$h['id'],
+        'name' => $h['name'],
+        'mode' => $h['mode'],
+        'role' => $h['role'],
+        'members' => array_map(fn($m) => ['id' => (int)$m['id'], 'display_name' => $m['display_name'], 'role' => $m['role'], 'joined_at' => $m['joined_at']],
+            q('SELECT u.id, u.display_name, m.role, m.joined_at FROM household_members m JOIN users u ON u.id = m.user_id WHERE m.household_id = ? ORDER BY m.joined_at, u.id', [$h['id']])->fetchAll()),
+    ];
+}
+
+/** Leave your household. The last one out closes it (and its shared kitchen); an owner leaving hands over to the longest member. */
+function leave_household(int $uid): void
+{
+    $h = my_household($uid);
+    if (!$h) {
+        return;
+    }
+    q('DELETE FROM household_members WHERE user_id = ?', [$uid]);
+    $left = q('SELECT user_id FROM household_members WHERE household_id = ? ORDER BY joined_at, user_id', [$h['id']])->fetchAll(PDO::FETCH_COLUMN);
+    if (!$left) {
+        q('DELETE FROM users WHERE id = ? AND is_kitchen = 1', [$h['kitchen_user_id']]);   // cascades to the household and its kitchen
+    } elseif ($h['role'] === 'owner') {
+        q("UPDATE household_members SET role = 'owner' WHERE user_id = ?", [$left[0]]);
+    }
+}
+
+/** The first time a household shares its kitchen, it starts as a copy of the kitchen of whoever switched it on. */
+function seed_kitchen(int $from, int $to): void
+{
+    if (q('SELECT 1 FROM stores WHERE user_id = ? LIMIT 1', [$to])->fetchColumn()) {
+        return;
+    }
+    foreach (q('SELECT id, name FROM stores WHERE user_id = ?', [$from])->fetchAll() as $st) {
+        q('INSERT INTO stores (user_id, name) VALUES (?, ?)', [$to, $st['name']]);
+        $new = (int)db()->lastInsertId();
+        // the latest price of each product at this shop, so the shared kitchen already knows what things cost
+        q('INSERT INTO prices (product_id, store_id, price, user_id, recorded_at)
+           SELECT p.product_id, ?, p.price, p.user_id, p.recorded_at FROM prices p
+           JOIN (SELECT MAX(id) id FROM prices WHERE store_id = ? GROUP BY product_id) m ON m.id = p.id', [$new, $st['id']]);
+    }
+    q('INSERT INTO pantry (user_id, product_id, amount, bought_count, last_bought) SELECT ?, product_id, amount, bought_count, last_bought FROM pantry WHERE user_id = ?', [$to, $from]);
+    q('INSERT INTO list_items (user_id, product_id, name, qty, unit_price, checked, from_plan, added_by)
+       SELECT ?, product_id, name, qty, unit_price, 0, from_plan, added_by FROM list_items WHERE user_id = ? AND checked = 0', [$to, $from]);
+    q('INSERT INTO plan (user_id, plan_date, slot, recipe_id, servings, eaten_at, fridge_taken)
+       SELECT ?, plan_date, slot, recipe_id, servings, eaten_at, fridge_taken FROM plan WHERE user_id = ? AND plan_date >= CURDATE()', [$to, $from]);
+    q('INSERT INTO fridge (recipe_id, name, portions, grams_per_portion, cost_per_portion, cooked_on, user_id, location, moved_on)
+       SELECT recipe_id, name, portions, grams_per_portion, cost_per_portion, cooked_on, ?, location, moved_on FROM fridge WHERE user_id = ? AND portions > 0', [$to, $from]);
+    q("INSERT INTO user_settings (user_id, k, v) SELECT ?, k, v FROM user_settings WHERE user_id = ? AND k IN ('monthly_budget', 'payday', 'aisle_order')", [$to, $from]);
+    q('INSERT IGNORE INTO pay_dates (user_id, paid_on) SELECT ?, paid_on FROM pay_dates WHERE user_id = ?', [$to, $from]);
+}
+
+/** An invite token from the request: valid, unused, not expired. */
+function invite_row(string $tok): array
+{
+    preg_match('/^[0-9a-f]{48}$/', $tok) || fail('That invite link is broken');
+    $row = q('SELECT i.*, h.name household, u.display_name inviter FROM household_invites i JOIN households h ON h.id = i.household_id
+              LEFT JOIN users u ON u.id = i.invited_by WHERE i.token_hash = ?', [hash('sha256', $tok)])->fetch();
+    if (!$row || $row['used_at'] !== null || strtotime($row['expires_at']) < time()) {
+        fail('That invite link has been used or has expired. Ask for a new one.', 410);
+    }
+    return $row;
 }
 
 /** A shop id from the request, only if it's one of this person's shops. */
@@ -149,7 +249,7 @@ function own_store(?int $id): ?int
     if ($id === null) {
         return null;
     }
-    if (!q('SELECT 1 FROM stores WHERE id = ? AND user_id = ?', [$id, me()])->fetchColumn()) {
+    if (!q('SELECT 1 FROM stores WHERE id = ? AND user_id = ?', [$id, kid()])->fetchColumn()) {
         fail('Unknown shop');
     }
     return $id;
@@ -157,13 +257,13 @@ function own_store(?int $id): ?int
 
 function user_setting(string $key, string $default = ''): string
 {
-    $v = q('SELECT v FROM user_settings WHERE user_id = ? AND k = ?', [me(), $key])->fetchColumn();
+    $v = q('SELECT v FROM user_settings WHERE user_id = ? AND k = ?', [in_array($key, KITCHEN_SETTINGS, true) ? kid() : me(), $key])->fetchColumn();
     return $v === false ? $default : (string)$v;
 }
 
 function set_user_setting(string $key, string $value): void
 {
-    q('INSERT INTO user_settings (user_id, k, v) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)', [me(), $key, $value]);
+    q('INSERT INTO user_settings (user_id, k, v) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)', [in_array($key, KITCHEN_SETTINGS, true) ? kid() : me(), $key, $value]);
 }
 
 const DEFAULT_STORES = ['Checkers', 'Pick n Pay', 'Shoprite'];
@@ -182,7 +282,7 @@ function record_price(int $productId, int $storeId, float $price, int $userId): 
 function pantry_map(): array
 {
     $m = [];
-    foreach (q('SELECT product_id, amount FROM pantry WHERE user_id = ? AND amount > 0', [me()]) as $r) {
+    foreach (q('SELECT product_id, amount FROM pantry WHERE user_id = ? AND amount > 0', [kid()]) as $r) {
         $m[(int)$r['product_id']] = (float)$r['amount'];
     }
     return $m;
@@ -190,7 +290,7 @@ function pantry_map(): array
 
 function pantry_add(int $productId, float $delta): void
 {
-    q('INSERT INTO pantry (user_id, product_id, amount) VALUES (?, ?, GREATEST(0, ?)) ON DUPLICATE KEY UPDATE amount = GREATEST(0, amount + ?)', [me(), $productId, $delta, $delta]);
+    q('INSERT INTO pantry (user_id, product_id, amount) VALUES (?, ?, GREATEST(0, ?)) ON DUPLICATE KEY UPDATE amount = GREATEST(0, amount + ?)', [kid(), $productId, $delta, $delta]);
 }
 
 /**
@@ -219,11 +319,11 @@ function need_to_list(array $need, int $uid, bool $fromPlan): int
         }
         $packs = max(1, (int)ceil($short / max(0.001, (float)$p['pack_size']) - 1e-6));
         $existing = $fromPlan ? false
-            : q('SELECT id FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0 AND from_plan = 0 LIMIT 1', [me(), $pid])->fetchColumn();
+            : q('SELECT id FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0 AND from_plan = 0 LIMIT 1', [kid(), $pid])->fetchColumn();
         if ($existing) {
             q('UPDATE list_items SET qty = qty + ? WHERE id = ?', [$packs, $existing]);
         } else {
-            q('INSERT INTO list_items (user_id, product_id, name, qty, from_plan, added_by) VALUES (?, ?, ?, ?, ?, ?)', [me(), $pid, $p['name'], $packs, $fromPlan ? 1 : 0, $uid]);
+            q('INSERT INTO list_items (user_id, product_id, name, qty, from_plan, added_by) VALUES (?, ?, ?, ?, ?, ?)', [kid(), $pid, $p['name'], $packs, $fromPlan ? 1 : 0, $uid]);
         }
         $added++;
     }
@@ -264,11 +364,13 @@ function nutrition_factor(string $unit, float $amount): float
 
 function recipes_with_costs(?int $onlyId = null): array
 {
-    // your own recipes, shared ones, and any you have in your plan or fridge (so a recipe someone unshares doesn't vanish from your week)
-    $visible = '(r.user_id = ? OR r.is_public = 1 OR r.id IN (SELECT recipe_id FROM plan WHERE user_id = ?) OR r.id IN (SELECT recipe_id FROM fridge WHERE user_id = ? AND recipe_id IS NOT NULL))';
+    // yours, your household's, shared ones, and any in your kitchen's plan or fridge (so a recipe someone unshares doesn't vanish from your week)
+    $people = household_people(me()) ?: [me()];
+    $in = implode(',', array_map('intval', $people));
+    $visible = "(r.user_id IN ($in) OR r.is_public = 1 OR r.id IN (SELECT recipe_id FROM plan WHERE user_id = ?) OR r.id IN (SELECT recipe_id FROM fridge WHERE user_id = ? AND recipe_id IS NOT NULL))";
     $recipes = $onlyId === null
-        ? q("SELECT r.*, u.display_name owner_name FROM recipes r LEFT JOIN users u ON u.id = r.user_id WHERE $visible ORDER BY r.name", [me(), me(), me()])->fetchAll()
-        : q("SELECT r.*, u.display_name owner_name FROM recipes r LEFT JOIN users u ON u.id = r.user_id WHERE r.id = ? AND $visible", [$onlyId, me(), me(), me()])->fetchAll();
+        ? q("SELECT r.*, u.display_name owner_name FROM recipes r LEFT JOIN users u ON u.id = r.user_id WHERE $visible ORDER BY r.name", [kid(), kid()])->fetchAll()
+        : q("SELECT r.*, u.display_name owner_name FROM recipes r LEFT JOIN users u ON u.id = r.user_id WHERE r.id = ? AND $visible", [$onlyId, kid(), kid()])->fetchAll();
     if (!$recipes) {
         return [];
     }
@@ -347,6 +449,7 @@ function recipes_with_costs(?int $onlyId = null): array
             'nutrition_per_serving' => $perServing,
             'missing_nutrition' => $nutMissing,
             'mine' => (int)$r['user_id'] === me(),
+            'household' => (int)$r['user_id'] !== me() && in_array((int)$r['user_id'], $people, true),
             'is_public' => (int)$r['is_public'] === 1,
             'owner_name' => $r['owner_name'] ?? null,
         ];
@@ -364,7 +467,7 @@ function pay_period(?string $date = null): array
     $d = new DateTimeImmutable($date ?? 'today');
     $day = max(1, min(31, (int)user_setting('payday', '1')));
     $marks = q('SELECT paid_on FROM pay_dates WHERE user_id = ? AND paid_on BETWEEN ? AND ?', [
-        me(), $d->modify('-100 days')->format('Y-m-d'), $d->modify('+100 days')->format('Y-m-d'),
+        kid(), $d->modify('-100 days')->format('Y-m-d'), $d->modify('+100 days')->format('Y-m-d'),
     ])->fetchAll(PDO::FETCH_COLUMN);
     $starts = $marks;
     for ($i = -3; $i <= 3; $i++) {
@@ -418,12 +521,12 @@ function alert_prefs(): array|stdClass
 function period_spent(array $period, string $kind = 'groceries'): float
 {
     return (float)q('SELECT COALESCE(SUM(total), 0) FROM trips WHERE user_id = ? AND kind = ? AND trip_date BETWEEN ? AND ?',
-        [me(), $kind, $period['start'], $period['end']])->fetchColumn();
+        [$kind === 'groceries' ? kid() : me(), $kind, $period['start'], $period['end']])->fetchColumn();
 }
 
 function month_spent(string $month, string $kind = 'groceries'): float
 {
-    return (float)q("SELECT COALESCE(SUM(total), 0) FROM trips WHERE user_id = ? AND kind = ? AND DATE_FORMAT(trip_date, '%Y-%m') = ?", [me(), $kind, $month])->fetchColumn();
+    return (float)q("SELECT COALESCE(SUM(total), 0) FROM trips WHERE user_id = ? AND kind = ? AND DATE_FORMAT(trip_date, '%Y-%m') = ?", [$kind === 'groceries' ? kid() : me(), $kind, $month])->fetchColumn();
 }
 
 /** Takeaway spend for the Monday-to-Sunday week containing $date, against the weekly allowance. */
@@ -456,7 +559,7 @@ function plan_entries(string $from, string $to): array
     foreach (recipes_with_costs() as $r) {
         $recipes[$r['id']] = $r;
     }
-    $rows = q("SELECT * FROM plan WHERE user_id = ? AND plan_date BETWEEN ? AND ? ORDER BY plan_date, FIELD(slot, 'breakfast', 'lunch', 'dinner', 'snack'), id", [me(), $from, $to])->fetchAll();
+    $rows = q("SELECT * FROM plan WHERE user_id = ? AND plan_date BETWEEN ? AND ? ORDER BY plan_date, FIELD(slot, 'breakfast', 'lunch', 'dinner', 'snack'), id", [kid(), $from, $to])->fetchAll();
     $entries = [];
     foreach ($rows as $r) {
         $rec = $recipes[(int)$r['recipe_id']] ?? null;
@@ -482,7 +585,7 @@ function plan_entries(string $from, string $to): array
 
 function fridge_list(): array
 {
-    $rows = q("SELECT f.*, r.servings FROM fridge f LEFT JOIN recipes r ON r.id = f.recipe_id WHERE f.user_id = ? AND f.portions > 0 ORDER BY f.location = 'freezer', f.cooked_on, f.id", [me()])->fetchAll();
+    $rows = q("SELECT f.*, r.servings FROM fridge f LEFT JOIN recipes r ON r.id = f.recipe_id WHERE f.user_id = ? AND f.portions > 0 ORDER BY f.location = 'freezer', f.cooked_on, f.id", [kid()])->fetchAll();
     $out = [];
     $today = new DateTimeImmutable('today');
     foreach ($rows as $r) {
@@ -721,6 +824,7 @@ if (!is_array($in)) {
 $uid = (int)$user['id'];
 $action = (string)($in['action'] ?? '');
 run_migrations();
+$kid = kitchen_of($uid);
 
 // an offline change carries an op_id; if we've already applied it, answer the same way again
 if (isset($in['op_id']) && preg_match('/^[0-9a-f-]{36}$/', (string)$in['op_id'])) {
@@ -742,10 +846,10 @@ try {
         case 'bootstrap':
             $month = date('Y-m');
             q('UPDATE users SET last_seen = NOW() WHERE id = ?', [$uid]);
-            if (!q('SELECT 1 FROM stores WHERE user_id = ? LIMIT 1', [$uid])->fetchColumn()) {
+            if (!q('SELECT 1 FROM stores WHERE user_id = ? LIMIT 1', [$kid])->fetchColumn()) {
                 // a fresh account starts with the usual shops (no prices yet)
                 foreach (DEFAULT_STORES as $n) {
-                    q('INSERT IGNORE INTO stores (user_id, name) VALUES (?, ?)', [$uid, $n]);
+                    q('INSERT IGNORE INTO stores (user_id, name) VALUES (?, ?)', [$kid, $n]);
                 }
             }
             out([
@@ -756,7 +860,7 @@ try {
                     'protein_target_g' => $u['protein_target_g'] === null ? null : (int)$u['protein_target_g'],
                     'kj_target' => $u['kj_target'] === null ? null : (int)$u['kj_target'],
                 ], q('SELECT id, display_name, protein_target_g, kj_target FROM users WHERE id = ?', [$uid])->fetchAll()),
-                'stores' => q('SELECT id, name FROM stores WHERE user_id = ? ORDER BY name', [$uid])->fetchAll(),
+                'stores' => q('SELECT id, name FROM stores WHERE user_id = ? ORDER BY name', [$kid])->fetchAll(),
                 'budget' => (float)user_setting('monthly_budget', '0'),
                 'spent' => period_spent(pay_period()),
                 'period' => pay_period(),
@@ -766,6 +870,7 @@ try {
                 'label_reader' => (string)config('anthropic_key', '') !== '',
                 'is_admin' => !empty($user['is_admin']),
                 'signups_open' => setting('signups_open', '1') === '1',
+                'household' => household_view($uid),
                 'month' => $month,
                 'currency' => config('currency', 'R'),
             ]);
@@ -776,24 +881,24 @@ try {
 
         // ----- stores -----
         case 'stores.add':
-            if (q('SELECT 1 FROM stores WHERE user_id = ? AND name = ?', [$uid, str_in($in, 'name', 60, true)])->fetchColumn()) {
+            if (q('SELECT 1 FROM stores WHERE user_id = ? AND name = ?', [$kid, str_in($in, 'name', 60, true)])->fetchColumn()) {
                 fail('You already have that shop');
             }
-            q('INSERT INTO stores (user_id, name) VALUES (?, ?)', [$uid, str_in($in, 'name', 60, true)]);
+            q('INSERT INTO stores (user_id, name) VALUES (?, ?)', [$kid, str_in($in, 'name', 60, true)]);
             out(['id' => (int)db()->lastInsertId()]);
 
         case 'stores.rename':
-            q('UPDATE stores SET name = ? WHERE id = ? AND user_id = ?', [str_in($in, 'name', 60, true), int_in($in, 'id'), $uid]);
+            q('UPDATE stores SET name = ? WHERE id = ? AND user_id = ?', [str_in($in, 'name', 60, true), int_in($in, 'id'), $kid]);
             out(['ok' => true]);
 
         case 'stores.delete':
-            q('DELETE FROM stores WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $uid]);
+            q('DELETE FROM stores WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $kid]);
             out(['ok' => true]);
 
         // ----- products -----
         case 'products.list':
             $prices = latest_prices();
-            $rows = array_map(fn($r) => product_row($r, $prices), q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? ORDER BY p.name', [$uid])->fetchAll());
+            $rows = array_map(fn($r) => product_row($r, $prices), q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? ORDER BY p.name', [$kid])->fetchAll());
             $photos = [];
             foreach (q('SELECT id, product_id, kind FROM product_photos ORDER BY id DESC') as $ph) {
                 $photos[(int)$ph['product_id']][] = ['id' => (int)$ph['id'], 'kind' => $ph['kind']];
@@ -808,7 +913,7 @@ try {
         case 'pantry.set':
             $pid = int_in($in, 'product_id');
             $amount = num_in($in, 'amount', 0, 0, 1e7);
-            q('INSERT INTO pantry (user_id, product_id, amount) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE amount = VALUES(amount)', [$uid, $pid, $amount]);
+            q('INSERT INTO pantry (user_id, product_id, amount) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE amount = VALUES(amount)', [$kid, $pid, $amount]);
             out(['ok' => true]);
 
         case 'aisles.set':
@@ -825,7 +930,7 @@ try {
                 // a shop's own label for weighed items (meat, deli): it encodes a price or weight, not a product
                 out(['product' => null, 'suggestion' => null, 'barcode' => $code, 'instore' => true]);
             }
-            $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.barcode = ?', [$uid, $code])->fetch();
+            $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.barcode = ?', [$kid, $code])->fetch();
             if ($row) {
                 out(['product' => product_row($row, latest_prices([(int)$row['id']])), 'suggestion' => null]);
             }
@@ -933,7 +1038,7 @@ try {
                 }
                 record_price($id, (int)$storeId, (float)$price, $uid);
             }
-            $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.id = ?', [$uid, $id])->fetch();
+            $row = q('SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ? WHERE p.id = ?', [$kid, $id])->fetch();
             out(['product' => product_row($row, latest_prices([$id]))]);
 
         case 'products.price':
@@ -943,7 +1048,7 @@ try {
         case 'products.history':
             out(['history' => q('SELECT pr.price, pr.recorded_at, s.name store, u.display_name who
                                   FROM prices pr JOIN stores s ON s.id = pr.store_id AND s.user_id = ? LEFT JOIN users u ON u.id = pr.user_id
-                                  WHERE pr.product_id = ? ORDER BY pr.id DESC LIMIT 50', [$uid, int_in($in, 'id')])->fetchAll()]);
+                                  WHERE pr.product_id = ? ORDER BY pr.id DESC LIMIT 50', [$kid, int_in($in, 'id')])->fetchAll()]);
 
         case 'products.delete':
             // products are shared by everyone: only the person who added it (or an admin) can delete it
@@ -962,7 +1067,7 @@ try {
         case 'list.get':
             $items = q('SELECT li.*, u.display_name added_by_name, p.pack_size, p.unit, p.brand, p.category
                         FROM list_items li LEFT JOIN products p ON p.id = li.product_id LEFT JOIN users u ON u.id = li.added_by
-                        WHERE li.user_id = ? ORDER BY li.checked, li.created_at, li.id', [$uid])->fetchAll();
+                        WHERE li.user_id = ? ORDER BY li.checked, li.created_at, li.id', [$kid])->fetchAll();
             $prices = latest_prices(array_values(array_filter(array_map(fn($i) => $i['product_id'] === null ? null : (int)$i['product_id'], $items))));
             foreach ($items as &$i) {
                 $i['id'] = (int)$i['id'];
@@ -975,7 +1080,7 @@ try {
                 $i['prices'] = (object)($i['product_id'] ? ($prices[$i['product_id']] ?? []) : []);
             }
             unset($i);
-            $lastShop = q("SELECT MAX(trip_date) FROM trips WHERE user_id = ? AND kind = 'groceries'", [$uid])->fetchColumn();
+            $lastShop = q("SELECT MAX(trip_date) FROM trips WHERE user_id = ? AND kind = 'groceries'", [$kid])->fetchColumn();
             out([
                 'items' => $items,
                 'spent' => period_spent(pay_period()),
@@ -997,8 +1102,8 @@ try {
                     fail('Unknown product');
                 }
                 $existing = $checked
-                    ? q('SELECT id FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 1 LIMIT 1', [$uid, $pid])->fetchColumn()
-                    : q('SELECT id FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0 AND from_plan = 0 LIMIT 1', [$uid, $pid])->fetchColumn();
+                    ? q('SELECT id FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 1 LIMIT 1', [$kid, $pid])->fetchColumn()
+                    : q('SELECT id FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0 AND from_plan = 0 LIMIT 1', [$kid, $pid])->fetchColumn();
                 if ($existing) {
                     q('UPDATE list_items SET qty = qty + ? WHERE id = ?', [$qty, $existing]);
                     out(['id' => (int)$existing]);
@@ -1007,12 +1112,12 @@ try {
                 $name = str_in($in, 'name', 120, true);
             }
             q('INSERT INTO list_items (user_id, product_id, name, qty, unit_price, added_by, checked) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [$uid, $pid, $name, $qty, $pid ? null : num_in($in, 'unit_price', null, 0, 1e6), $uid, $checked]);
+                [$kid, $pid, $name, $qty, $pid ? null : num_in($in, 'unit_price', null, 0, 1e6), $uid, $checked]);
             out(['id' => (int)db()->lastInsertId()]);
 
         case 'list.update':
             $id = int_in($in, 'id');
-            $item = q('SELECT * FROM list_items WHERE id = ? AND user_id = ?', [$id, $uid])->fetch() ?: fail('Item not found', 404);
+            $item = q('SELECT * FROM list_items WHERE id = ? AND user_id = ?', [$id, $kid])->fetch() ?: fail('Item not found', 404);
             if (array_key_exists('qty', $in)) {
                 q('UPDATE list_items SET qty = ? WHERE id = ?', [num_in($in, 'qty', 1, 0.01, 1000), $id]);
             }
@@ -1034,17 +1139,17 @@ try {
             out(['ok' => true]);
 
         case 'list.delete':
-            q('DELETE FROM list_items WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $uid]);
+            q('DELETE FROM list_items WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $kid]);
             out(['ok' => true]);
 
         case 'list.clear':
-            q(!empty($in['all']) ? 'DELETE FROM list_items WHERE user_id = ?' : 'DELETE FROM list_items WHERE user_id = ? AND checked = 1', [$uid]);
+            q(!empty($in['all']) ? 'DELETE FROM list_items WHERE user_id = ?' : 'DELETE FROM list_items WHERE user_id = ? AND checked = 1', [$kid]);
             out(['ok' => true]);
 
         case 'list.checkout':
             $storeId = own_store(int_in($in, 'store_id', false));
             $date = date_in($in, 'date', date('Y-m-d'));
-            $items = q('SELECT * FROM list_items WHERE user_id = ? AND checked = 1', [$uid])->fetchAll();
+            $items = q('SELECT * FROM list_items WHERE user_id = ? AND checked = 1', [$kid])->fetchAll();
             if (!$items) {
                 fail('Tick off what you bought first');
             }
@@ -1057,18 +1162,18 @@ try {
             }
             $total = num_in($in, 'total', round($estimate, 2), 0, 1e6);
             db()->beginTransaction();
-            q('INSERT INTO trips (trip_date, store_id, total, note, user_id, estimate) VALUES (?, ?, ?, ?, ?, ?)',
-                [$date, $storeId, $total, str_in($in, 'note', 200), $uid, round($estimate, 2)]);
+            q('INSERT INTO trips (trip_date, store_id, total, note, user_id, estimate, added_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [$date, $storeId, $total, str_in($in, 'note', 200), $kid, round($estimate, 2), $uid]);
             foreach ($items as $i) {
                 if ($i['product_id'] !== null) {
                     $pack = q('SELECT pack_size FROM products WHERE id = ?', [$i['product_id']])->fetchColumn();
                     if ($pack !== false) {
                         pantry_add((int)$i['product_id'], (float)$i['qty'] * (float)$pack);
-                        q('UPDATE pantry SET bought_count = bought_count + 1, last_bought = ? WHERE user_id = ? AND product_id = ?', [$date, $uid, $i['product_id']]);
+                        q('UPDATE pantry SET bought_count = bought_count + 1, last_bought = ? WHERE user_id = ? AND product_id = ?', [$date, $kid, $i['product_id']]);
                     }
                 }
             }
-            q('DELETE FROM list_items WHERE user_id = ? AND checked = 1', [$uid]);
+            q('DELETE FROM list_items WHERE user_id = ? AND checked = 1', [$kid]);
             db()->commit();
             out(['total' => $total, 'estimate' => round($estimate, 2), 'spent' => period_spent(pay_period())]);
 
@@ -1124,7 +1229,7 @@ try {
         case 'recipes.delete':
             $rid = int_in($in, 'id');
             own_recipe($rid);
-            $others = (int)q('SELECT COUNT(DISTINCT user_id) FROM plan WHERE recipe_id = ? AND user_id <> ?', [$rid, $uid])->fetchColumn();
+            $others = (int)q('SELECT COUNT(DISTINCT user_id) FROM plan WHERE recipe_id = ? AND user_id NOT IN (?, ?)', [$rid, $uid, $kid])->fetchColumn();   // other kitchens
             if ($others) {
                 fail($others === 1 ? 'Someone else has this recipe in their meal plan. Unshare it instead, so nobody new can add it.' : "$others people have this recipe in their meal plan. Unshare it instead, so nobody new can add it.");
             }
@@ -1186,7 +1291,7 @@ try {
             db()->beginTransaction();
             q('INSERT INTO fridge (recipe_id, name, portions, grams_per_portion, cost_per_portion, cooked_on, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)', [
                 $rid, $name, $cookPortions,
-                $grams === null ? null : (int)round($grams), $cpp, date_in($in, 'date', date('Y-m-d')), $uid,
+                $grams === null ? null : (int)round($grams), $cpp, date_in($in, 'date', date('Y-m-d')), $kid,
             ]);
             if ($rid) {
                 // cooking uses up what was at home
@@ -1198,26 +1303,26 @@ try {
             out(['fridge' => fridge_list()]);
 
         case 'fridge.eat':
-            q('UPDATE fridge SET portions = GREATEST(0, portions - ?) WHERE id = ? AND user_id = ?', [num_in($in, 'n', 1, 0.25, 500), int_in($in, 'id'), $uid]);
-            q('DELETE FROM fridge WHERE user_id = ? AND portions <= 0', [$uid]);
+            q('UPDATE fridge SET portions = GREATEST(0, portions - ?) WHERE id = ? AND user_id = ?', [num_in($in, 'n', 1, 0.25, 500), int_in($in, 'id'), $kid]);
+            q('DELETE FROM fridge WHERE user_id = ? AND portions <= 0', [$kid]);
             out(['fridge' => fridge_list()]);
 
         case 'fridge.set':
-            q('UPDATE fridge SET portions = ? WHERE id = ? AND user_id = ?', [num_in($in, 'portions', null, 0, 500) ?? fail('Missing portions'), int_in($in, 'id'), $uid]);
-            q('DELETE FROM fridge WHERE user_id = ? AND portions <= 0', [$uid]);
+            q('UPDATE fridge SET portions = ? WHERE id = ? AND user_id = ?', [num_in($in, 'portions', null, 0, 500) ?? fail('Missing portions'), int_in($in, 'id'), $kid]);
+            q('DELETE FROM fridge WHERE user_id = ? AND portions <= 0', [$kid]);
             out(['fridge' => fridge_list()]);
 
         case 'fridge.move':
             // freeze or thaw a batch; n portions splits them off into their own batch
             $id = int_in($in, 'id');
             $to = ($in['to'] ?? '') === 'freezer' ? 'freezer' : 'fridge';
-            $b = q('SELECT * FROM fridge WHERE id = ? AND user_id = ?', [$id, $uid])->fetch() ?: fail('Not found', 404);
+            $b = q('SELECT * FROM fridge WHERE id = ? AND user_id = ?', [$id, $kid])->fetch() ?: fail('Not found', 404);
             $n = num_in($in, 'n', (float)$b['portions'], 0.25, 500);
             db()->beginTransaction();
             if ($n < (float)$b['portions'] - 1e-6) {
                 q('UPDATE fridge SET portions = portions - ? WHERE id = ?', [$n, $id]);
                 q('INSERT INTO fridge (recipe_id, name, portions, grams_per_portion, cost_per_portion, cooked_on, user_id, location, moved_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURDATE())',
-                    [$b['recipe_id'], $b['name'], $n, $b['grams_per_portion'], $b['cost_per_portion'], $b['cooked_on'], $uid, $to]);
+                    [$b['recipe_id'], $b['name'], $n, $b['grams_per_portion'], $b['cost_per_portion'], $b['cooked_on'], $kid, $to]);
             } else {
                 q('UPDATE fridge SET location = ?, moved_on = CURDATE() WHERE id = ?', [$to, $id]);
             }
@@ -1225,7 +1330,7 @@ try {
             out(['fridge' => fridge_list()]);
 
         case 'fridge.delete':
-            q('DELETE FROM fridge WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $uid]);
+            q('DELETE FROM fridge WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $kid]);
             out(['fridge' => fridge_list()]);
 
         // ----- takeaways -----
@@ -1233,10 +1338,10 @@ try {
             out(['takeaway' => takeaway_week()]);
 
         case 'takeaway.add':
-            q("INSERT INTO trips (trip_date, store_id, total, note, user_id, kind) VALUES (?, NULL, ?, ?, ?, 'eating_out')", [
+            q("INSERT INTO trips (trip_date, store_id, total, note, user_id, kind, added_by) VALUES (?, NULL, ?, ?, ?, 'eating_out', ?)", [
                 date_in($in, 'date', date('Y-m-d')),
                 num_in($in, 'total', null, 0, 1e5) ?? fail('How much was it?'),
-                str_in($in, 'note', 200), $uid,
+                str_in($in, 'note', 200), $uid, $uid,
             ]);
             out(['takeaway' => takeaway_week()]);
 
@@ -1251,7 +1356,7 @@ try {
         case 'plan.eat':
             // mark a planned meal eaten (or undo); takes its servings from the oldest fridge batches of that recipe
             $id = int_in($in, 'id');
-            $p = q('SELECT * FROM plan WHERE id = ? AND user_id = ?', [$id, $uid])->fetch() ?: fail('Meal not found', 404);
+            $p = q('SELECT * FROM plan WHERE id = ? AND user_id = ?', [$id, $kid])->fetch() ?: fail('Meal not found', 404);
             db()->beginTransaction();
             if (empty($in['undo'])) {
                 if ($p['eaten_at'] !== null) {
@@ -1260,7 +1365,7 @@ try {
                 }
                 $want = (float)$p['servings'];
                 $taken = 0.0;
-                foreach (q("SELECT id, portions FROM fridge WHERE user_id = ? AND recipe_id = ? AND portions > 0 ORDER BY location = 'freezer', cooked_on, id FOR UPDATE", [$uid, $p['recipe_id']])->fetchAll() as $b) {
+                foreach (q("SELECT id, portions FROM fridge WHERE user_id = ? AND recipe_id = ? AND portions > 0 ORDER BY location = 'freezer', cooked_on, id FOR UPDATE", [$kid, $p['recipe_id']])->fetchAll() as $b) {
                     if ($taken >= $want) {
                         break;
                     }
@@ -1268,20 +1373,20 @@ try {
                     q('UPDATE fridge SET portions = portions - ? WHERE id = ?', [$take, $b['id']]);
                     $taken += $take;
                 }
-                q('DELETE FROM fridge WHERE user_id = ? AND portions <= 0', [$uid]);
+                q('DELETE FROM fridge WHERE user_id = ? AND portions <= 0', [$kid]);
                 q('UPDATE plan SET eaten_at = NOW(), fridge_taken = ? WHERE id = ?', [$taken, $id]);
                 db()->commit();
                 out(['taken' => $taken]);
             }
             $back = (float)$p['fridge_taken'];
             if ($back > 0) {
-                $latest = q('SELECT id FROM fridge WHERE user_id = ? AND recipe_id = ? ORDER BY cooked_on DESC, id DESC LIMIT 1', [$uid, $p['recipe_id']])->fetchColumn();
+                $latest = q('SELECT id FROM fridge WHERE user_id = ? AND recipe_id = ? ORDER BY cooked_on DESC, id DESC LIMIT 1', [$kid, $p['recipe_id']])->fetchColumn();
                 if ($latest) {
                     q('UPDATE fridge SET portions = portions + ? WHERE id = ?', [$back, $latest]);
                 } else {
                     $rec = recipes_with_costs((int)$p['recipe_id'])[0] ?? null;
                     q('INSERT INTO fridge (recipe_id, name, portions, cost_per_portion, cooked_on, user_id) VALUES (?, ?, ?, ?, CURDATE(), ?)',
-                        [$p['recipe_id'], $rec['name'] ?? 'Meal', $back, $rec && !$rec['missing_prices'] ? $rec['cost_per_serving'] : null, $uid]);
+                        [$p['recipe_id'], $rec['name'] ?? 'Meal', $back, $rec && !$rec['missing_prices'] ? $rec['cost_per_serving'] : null, $kid]);
                 }
             }
             q('UPDATE plan SET eaten_at = NULL, fridge_taken = 0 WHERE id = ?', [$id]);
@@ -1294,14 +1399,14 @@ try {
             $vals = [date_in($in, 'date'), $slot, int_in($in, 'recipe_id'), num_in($in, 'servings', 1, 0.25, 50)];
             can_see_recipe($vals[2]) || fail('Recipe not found', 404);
             if ($id) {
-                q('UPDATE plan SET plan_date = ?, slot = ?, recipe_id = ?, servings = ? WHERE id = ? AND user_id = ?', [...$vals, $id, $uid]);
+                q('UPDATE plan SET plan_date = ?, slot = ?, recipe_id = ?, servings = ? WHERE id = ? AND user_id = ?', [...$vals, $id, $kid]);
             } else {
-                q('INSERT INTO plan (plan_date, slot, recipe_id, servings, user_id) VALUES (?, ?, ?, ?, ?)', [...$vals, $uid]);
+                q('INSERT INTO plan (plan_date, slot, recipe_id, servings, user_id) VALUES (?, ?, ?, ?, ?)', [...$vals, $kid]);
             }
             out(['ok' => true]);
 
         case 'plan.delete':
-            q('DELETE FROM plan WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $uid]);
+            q('DELETE FROM plan WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $kid]);
             out(['ok' => true]);
 
         case 'plan.bulk':
@@ -1328,16 +1433,16 @@ try {
             foreach ($clean as [$date, $slot, $rid, $servings]) {
                 $key = "$date|$slot";
                 if ($mode === 'replace' && !isset($slotsDone[$key])) {
-                    q('DELETE FROM plan WHERE user_id = ? AND plan_date = ? AND slot = ? AND eaten_at IS NULL', [$uid, $date, $slot]);
+                    q('DELETE FROM plan WHERE user_id = ? AND plan_date = ? AND slot = ? AND eaten_at IS NULL', [$kid, $date, $slot]);
                 } elseif ($mode === 'fill' && !isset($slotsDone[$key])
-                    && q('SELECT 1 FROM plan WHERE user_id = ? AND plan_date = ? AND slot = ? LIMIT 1', [$uid, $date, $slot])->fetchColumn()) {
+                    && q('SELECT 1 FROM plan WHERE user_id = ? AND plan_date = ? AND slot = ? LIMIT 1', [$kid, $date, $slot])->fetchColumn()) {
                     $slotsDone[$key] = 'skip';
                 }
                 if (($slotsDone[$key] ?? null) === 'skip') {
                     continue;
                 }
                 $slotsDone[$key] = 'done';
-                q('INSERT INTO plan (plan_date, slot, recipe_id, servings, user_id) VALUES (?, ?, ?, ?, ?)', [$date, $slot, $rid, $servings, $uid]);
+                q('INSERT INTO plan (plan_date, slot, recipe_id, servings, user_id) VALUES (?, ?, ?, ?, ?)', [$date, $slot, $rid, $servings, $kid]);
                 $added++;
             }
             db()->commit();
@@ -1346,10 +1451,10 @@ try {
         case 'plan.copy_week':
             // copy one week's plan onto the following week
             $from = date_in($in, 'from');
-            $rows = q('SELECT * FROM plan WHERE user_id = ? AND plan_date BETWEEN ? AND DATE_ADD(?, INTERVAL 6 DAY)', [$uid, $from, $from])->fetchAll();
+            $rows = q('SELECT * FROM plan WHERE user_id = ? AND plan_date BETWEEN ? AND DATE_ADD(?, INTERVAL 6 DAY)', [$kid, $from, $from])->fetchAll();
             foreach ($rows as $r) {
                 q('INSERT INTO plan (plan_date, slot, recipe_id, servings, user_id) VALUES (DATE_ADD(?, INTERVAL 7 DAY), ?, ?, ?, ?)',
-                    [$r['plan_date'], $r['slot'], $r['recipe_id'], $r['servings'], $uid]);
+                    [$r['plan_date'], $r['slot'], $r['recipe_id'], $r['servings'], $kid]);
             }
             out(['copied' => count($rows)]);
 
@@ -1358,10 +1463,10 @@ try {
             $to = date_in($in, 'to');
             // portions still to cook per recipe = uneaten planned servings - what's already cooked in the fridge
             $toCook = [];
-            foreach (q('SELECT recipe_id, SUM(servings) s FROM plan WHERE user_id = ? AND plan_date BETWEEN ? AND ? AND eaten_at IS NULL GROUP BY recipe_id', [$uid, $from, $to]) as $r) {
+            foreach (q('SELECT recipe_id, SUM(servings) s FROM plan WHERE user_id = ? AND plan_date BETWEEN ? AND ? AND eaten_at IS NULL GROUP BY recipe_id', [$kid, $from, $to]) as $r) {
                 $toCook[(int)$r['recipe_id']] = (float)$r['s'];
             }
-            foreach (q('SELECT recipe_id, SUM(portions) p FROM fridge WHERE user_id = ? AND recipe_id IS NOT NULL GROUP BY recipe_id', [$uid]) as $r) {
+            foreach (q('SELECT recipe_id, SUM(portions) p FROM fridge WHERE user_id = ? AND recipe_id IS NOT NULL GROUP BY recipe_id', [$kid]) as $r) {
                 if (isset($toCook[(int)$r['recipe_id']])) {
                     $toCook[(int)$r['recipe_id']] -= (float)$r['p'];
                 }
@@ -1376,7 +1481,7 @@ try {
                 }
             }
             db()->beginTransaction();
-            q('DELETE FROM list_items WHERE user_id = ? AND from_plan = 1 AND checked = 0', [$uid]);
+            q('DELETE FROM list_items WHERE user_id = ? AND from_plan = 1 AND checked = 0', [$kid]);
             $added = need_to_list($need, $uid, true);
             db()->commit();
             out(['added' => $added]);
@@ -1385,9 +1490,10 @@ try {
         case 'budget.get':
             $period = pay_period(date_in($in, 'date', date('Y-m-d')));
             $month = substr($period['start'], 0, 7);
-            $trips = q('SELECT t.id, t.trip_date, t.total, t.estimate, t.note, t.kind, s.name store, u.display_name who
-                        FROM trips t LEFT JOIN stores s ON s.id = t.store_id LEFT JOIN users u ON u.id = t.user_id
-                        WHERE t.user_id = ? AND t.trip_date BETWEEN ? AND ? ORDER BY t.trip_date DESC, t.id DESC', [$uid, $period['start'], $period['end']])->fetchAll();
+            $trips = q("SELECT t.id, t.trip_date, t.total, t.estimate, t.note, t.kind, s.name store, u.display_name who
+                        FROM trips t LEFT JOIN stores s ON s.id = t.store_id LEFT JOIN users u ON u.id = COALESCE(t.added_by, t.user_id)
+                        WHERE ((t.user_id = ? AND t.kind = 'groceries') OR (t.user_id = ? AND t.kind = 'eating_out'))
+                          AND t.trip_date BETWEEN ? AND ? ORDER BY t.trip_date DESC, t.id DESC", [$kid, $uid, $period['start'], $period['end']])->fetchAll();
             foreach ($trips as &$t) {
                 $t['total'] = (float)$t['total'];
                 $t['estimate'] = $t['estimate'] === null ? null : (float)$t['estimate'];
@@ -1397,7 +1503,7 @@ try {
                 'month' => $month,
                 'period' => $period,
                 'payday' => (int)user_setting('payday', '1'),
-                'pay_marks' => q('SELECT paid_on FROM pay_dates WHERE user_id = ? ORDER BY paid_on DESC LIMIT 6', [$uid])->fetchAll(PDO::FETCH_COLUMN),
+                'pay_marks' => q('SELECT paid_on FROM pay_dates WHERE user_id = ? ORDER BY paid_on DESC LIMIT 6', [$kid])->fetchAll(PDO::FETCH_COLUMN),
                 'budget' => (float)user_setting('monthly_budget', '0'),
                 'spent' => period_spent($period),
                 'eating_out' => period_spent($period, 'eating_out'),
@@ -1417,11 +1523,11 @@ try {
 
         case 'pay.mark':
             // "I got paid today" (or on a date): starts a new pay period, e.g. early December pay
-            q('INSERT IGNORE INTO pay_dates (user_id, paid_on) VALUES (?, ?)', [$uid, date_in($in, 'date', date('Y-m-d'))]);
+            q('INSERT IGNORE INTO pay_dates (user_id, paid_on) VALUES (?, ?)', [$kid, date_in($in, 'date', date('Y-m-d'))]);
             out(['period' => pay_period()]);
 
         case 'pay.unmark':
-            q('DELETE FROM pay_dates WHERE user_id = ? AND paid_on = ?', [$uid, date_in($in, 'date')]);
+            q('DELETE FROM pay_dates WHERE user_id = ? AND paid_on = ?', [$kid, date_in($in, 'date')]);
             out(['period' => pay_period()]);
 
         case 'alerts.set':
@@ -1446,22 +1552,23 @@ try {
             $from = int_in($in, 'from');
             $to = int_in($in, 'to');
             $name = q('SELECT name FROM products WHERE id = ?', [$to])->fetchColumn() ?: fail('Unknown product');
-            $lines = q('SELECT id FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0', [$uid, $from])->fetchAll(PDO::FETCH_COLUMN);
+            $lines = q('SELECT id FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0', [$kid, $from])->fetchAll(PDO::FETCH_COLUMN);
             db()->beginTransaction();
-            q('DELETE FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0', [$uid, $from]);
-            q('INSERT INTO list_items (user_id, product_id, name, qty, added_by, checked) VALUES (?, ?, ?, 1, ?, ?)', [$uid, $to, $name, $uid, !empty($in['checked']) ? 1 : 0]);
+            q('DELETE FROM list_items WHERE user_id = ? AND product_id = ? AND checked = 0', [$kid, $from]);
+            q('INSERT INTO list_items (user_id, product_id, name, qty, added_by, checked) VALUES (?, ?, ?, 1, ?, ?)', [$kid, $to, $name, $uid, !empty($in['checked']) ? 1 : 0]);
             db()->commit();
             out(['replaced' => count($lines)]);
 
         case 'trips.add':
-            q('INSERT INTO trips (trip_date, store_id, total, note, user_id) VALUES (?, ?, ?, ?, ?)', [
+            q('INSERT INTO trips (trip_date, store_id, total, note, user_id, added_by) VALUES (?, ?, ?, ?, ?, ?)', [
                 date_in($in, 'date', date('Y-m-d')), own_store(int_in($in, 'store_id', false)),
-                num_in($in, 'total', null, 0, 1e6) ?? fail('Missing total'), str_in($in, 'note', 200), $uid,
+                num_in($in, 'total', null, 0, 1e6) ?? fail('Missing total'), str_in($in, 'note', 200), $kid, $uid,
             ]);
             out(['ok' => true]);
 
         case 'trips.delete':
-            q('DELETE FROM trips WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $uid]);
+            // your kitchen's shops, or your own takeaways
+            q("DELETE FROM trips WHERE id = ? AND ((user_id = ? AND kind = 'groceries') OR (user_id = ? AND kind = 'eating_out'))", [int_in($in, 'id'), $kid, $uid]);
             out(['ok' => true]);
 
         case 'account.targets':
@@ -1506,6 +1613,8 @@ try {
                 'pay_dates' => $mine('SELECT paid_on FROM pay_dates WHERE user_id = ?'),
                 'ingredient_alerts' => $mine('SELECT code, mode FROM ingredient_alerts WHERE user_id = ?'),
                 'my_recipes' => array_values(array_filter(recipes_with_costs(), fn($r) => $r['mine'])),
+                'household' => household_view($uid),
+                'shops_you_logged_for_your_household' => $mine('SELECT trip_date, kind, total, estimate, note FROM trips WHERE added_by = ? AND user_id <> added_by'),
             ]]);
 
         case 'account.delete':
@@ -1518,6 +1627,7 @@ try {
                 fail('You run this app. Make someone else an admin first.');
             }
             db()->beginTransaction();
+            leave_household($uid);
             q('DELETE FROM trips WHERE user_id = ?', [$uid]);
             q('DELETE FROM fridge WHERE user_id = ?', [$uid]);
             // private recipes go, except ones someone else still has in their plan or fridge (those stay, ownerless)
@@ -1529,18 +1639,96 @@ try {
             log_out();
             out(['ok' => true]);
 
+        // ----- households -----
+        case 'household.get':
+            out(['household' => household_view($uid)]);
+
+        case 'household.create':
+            my_household($uid) && fail("You're already in a household. Leave it first.");
+            $name = str_in($in, 'name', 60, true);
+            db()->beginTransaction();
+            // the shared kitchen belongs to a hidden account that can't log in, so no one person owns it
+            q('INSERT INTO users (username, display_name, password_hash, disabled, is_kitchen) VALUES (?, ?, ?, 1, 1)',
+                ['kitchen:' . bin2hex(random_bytes(8)), $name, password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT)]);
+            $kitchen = (int)db()->lastInsertId();
+            q('INSERT INTO households (name, kitchen_user_id, created_by) VALUES (?, ?, ?)', [$name, $kitchen, $uid]);
+            q("INSERT INTO household_members (user_id, household_id, role) VALUES (?, ?, 'owner')", [$uid, (int)db()->lastInsertId()]);
+            db()->commit();
+            out(['household' => household_view($uid)]);
+
+        case 'household.rename':
+            $h = my_household($uid) ?: fail("You're not in a household");
+            $name = str_in($in, 'name', 60, true);
+            q('UPDATE households SET name = ? WHERE id = ?', [$name, $h['id']]);
+            q('UPDATE users SET display_name = ? WHERE id = ? AND is_kitchen = 1', [$name, $h['kitchen_user_id']]);
+            out(['household' => household_view($uid)]);
+
+        case 'household.invite':
+            $h = my_household($uid) ?: fail('Start a household first');
+            (int)q('SELECT COUNT(*) FROM household_members WHERE household_id = ?', [$h['id']])->fetchColumn() >= 8 && fail('A household can have up to 8 people');
+            rate_ok('invite:' . $uid, 20, 86400) || fail('That is a lot of invites for one day. Try again tomorrow.', 429);
+            $tok = bin2hex(random_bytes(24));
+            q('INSERT INTO household_invites (token_hash, household_id, invited_by, expires_at) VALUES (?, ?, ?, NOW() + INTERVAL 7 DAY)', [hash('sha256', $tok), $h['id'], $uid]);
+            out(['token' => $tok, 'household' => $h['name']]);
+
+        case 'household.preview':
+            $inv = invite_row((string)($in['token'] ?? ''));
+            out(['household' => $inv['household'], 'inviter' => $inv['inviter'],
+                 'members' => (int)q('SELECT COUNT(*) FROM household_members WHERE household_id = ?', [$inv['household_id']])->fetchColumn(),
+                 'already' => (bool)my_household($uid), 'same' => ($h = my_household($uid)) && (int)$h['id'] === (int)$inv['household_id']]);
+
+        case 'household.join':
+            $inv = invite_row((string)($in['token'] ?? ''));
+            if ($h = my_household($uid)) {
+                fail((int)$h['id'] === (int)$inv['household_id'] ? "You're already in this household" : "You're already in a household. Leave it first, then open the link again.");
+            }
+            (int)q('SELECT COUNT(*) FROM household_members WHERE household_id = ?', [$inv['household_id']])->fetchColumn() >= 8 && fail('That household is full (8 people)');
+            db()->beginTransaction();
+            q('UPDATE household_invites SET used_at = NOW(), used_by = ? WHERE token_hash = ? AND used_at IS NULL', [$uid, $inv['token_hash']]);
+            q("INSERT INTO household_members (user_id, household_id, role) VALUES (?, ?, 'member')", [$uid, $inv['household_id']]);
+            db()->commit();
+            out(['household' => household_view($uid)]);
+
+        case 'household.mode':
+            $h = my_household($uid) ?: fail("You're not in a household");
+            $mode = (string)($in['mode'] ?? '');
+            in_array($mode, ['separate', 'shared'], true) || fail('Pick separate or shared');
+            db()->beginTransaction();
+            if ($mode === 'shared') {
+                seed_kitchen($uid, (int)$h['kitchen_user_id']);
+            }
+            q('UPDATE households SET mode = ? WHERE id = ?', [$mode, $h['id']]);
+            db()->commit();
+            out(['household' => household_view($uid)]);
+
+        case 'household.remove':
+            $h = my_household($uid) ?: fail("You're not in a household");
+            $h['role'] === 'owner' || fail('Only the person who runs the household can remove people', 403);
+            $target = int_in($in, 'user_id');
+            $target === $uid && fail('To leave, use Leave household');
+            q('SELECT 1 FROM household_members WHERE user_id = ? AND household_id = ?', [$target, $h['id']])->fetchColumn() || fail('Not in your household', 404);
+            leave_household($target);
+            out(['household' => household_view($uid)]);
+
+        case 'household.leave':
+            db()->beginTransaction();
+            leave_household($uid);
+            db()->commit();
+            out(['household' => null]);
+
         case 'admin.users':
             empty($user['is_admin']) && fail('Admins only', 403);
             out(['users' => q('SELECT u.id, u.username, u.display_name, u.created_at, u.last_seen, u.is_admin, u.disabled,
                                       (SELECT COUNT(*) FROM recipes r WHERE r.user_id = u.id) recipes,
                                       (SELECT COUNT(*) FROM trips t WHERE t.user_id = u.id) trips
-                               FROM users u ORDER BY u.created_at')->fetchAll(),
+                               FROM users u WHERE u.is_kitchen = 0 ORDER BY u.created_at')->fetchAll(),
                 'signups_open' => setting('signups_open', '1') === '1']);
 
         case 'admin.reset':
             // a one-time link (24 hours) to set a new password; send it to them yourself
             empty($user['is_admin']) && fail('Admins only', 403);
             $target = int_in($in, 'user_id');
+            q('SELECT 1 FROM users WHERE id = ? AND is_kitchen = 0', [$target])->fetchColumn() || fail('No such person', 404);
             $tok = bin2hex(random_bytes(24));
             q('DELETE FROM password_resets WHERE user_id = ?', [$target]);
             q('INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES (?, ?, NOW() + INTERVAL 1 DAY)', [hash('sha256', $tok), $target]);

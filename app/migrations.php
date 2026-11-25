@@ -187,6 +187,44 @@ const MIGRATIONS = [
         ) ENGINE=InnoDB",
         "INSERT IGNORE INTO settings (k, v) VALUES ('signups_open', '1')",
     ],
+    // households: people invite each other; a shared kitchen is owned by a hidden "kitchen" account, so anyone can leave
+    11 => [
+        "ALTER TABLE users ADD COLUMN is_kitchen TINYINT(1) NOT NULL DEFAULT 0",
+        "CREATE TABLE IF NOT EXISTS households (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(60) NOT NULL,
+            mode VARCHAR(10) NOT NULL DEFAULT 'separate',
+            kitchen_user_id INT UNSIGNED NOT NULL,
+            created_by INT UNSIGNED NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (kitchen_user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        // one household per person: the person is the primary key
+        "CREATE TABLE IF NOT EXISTS household_members (
+            user_id INT UNSIGNED NOT NULL PRIMARY KEY,
+            household_id INT UNSIGNED NOT NULL,
+            role VARCHAR(10) NOT NULL DEFAULT 'member',
+            joined_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX (household_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (household_id) REFERENCES households(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB",
+        "CREATE TABLE IF NOT EXISTS household_invites (
+            token_hash CHAR(64) PRIMARY KEY,
+            household_id INT UNSIGNED NOT NULL,
+            invited_by INT UNSIGNED NULL,
+            expires_at DATETIME NOT NULL,
+            used_at DATETIME NULL,
+            used_by INT UNSIGNED NULL,
+            FOREIGN KEY (household_id) REFERENCES households(id) ON DELETE CASCADE,
+            FOREIGN KEY (invited_by) REFERENCES users(id) ON DELETE SET NULL,
+            FOREIGN KEY (used_by) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB",
+        // who logged a shop, so a shared kitchen's budget shows who spent it
+        "ALTER TABLE trips ADD COLUMN added_by INT UNSIGNED NULL, ADD FOREIGN KEY (added_by) REFERENCES users(id) ON DELETE SET NULL",
+        "UPDATE trips SET added_by = user_id",
+    ],
 ];
 
 function schema_version(): int
