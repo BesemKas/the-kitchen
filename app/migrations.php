@@ -66,6 +66,15 @@ const MIGRATIONS = [
         "ALTER TABLE products ADD COLUMN bought_count INT UNSIGNED NOT NULL DEFAULT 0, ADD COLUMN last_bought DATE NULL",
         "INSERT IGNORE INTO settings (k, v) VALUES ('aisle_order', '[\"Fresh produce\",\"Meat & fish\",\"Dairy & eggs\",\"Bakery\",\"Pantry\",\"Frozen\",\"Household\"]')",
     ],
+    6 => [
+        // changes made offline are replayed later; this makes a replay of an already-saved change a no-op
+        "CREATE TABLE op_log (
+            op_id CHAR(36) PRIMARY KEY,
+            response MEDIUMTEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX (created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+    ],
 ];
 
 function schema_version(): int

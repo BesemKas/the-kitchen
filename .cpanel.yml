@@ -8,7 +8,7 @@ deployment:
     - export DEPLOYPATH=/home1/tru645/public_html/
     - export TOOLSPATH=/home1/tru645/kitchen-tools/
     - /bin/mkdir -p ${DEPLOYPATH}app ${DEPLOYPATH}assets ${TOOLSPATH}
-    - /bin/cp -f index.php api.php manifest.webmanifest .htaccess ${DEPLOYPATH}
+    - /bin/cp -f index.php api.php sw.js manifest.webmanifest .htaccess ${DEPLOYPATH}
     - /bin/cp -f app/bootstrap.php app/migrations.php app/schema.sql app/config.sample.php app/.htaccess ${DEPLOYPATH}app/
     - /bin/cp -Rf assets/. ${DEPLOYPATH}assets/
     - /bin/cp -f tools/backup.php ${TOOLSPATH}

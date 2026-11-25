@@ -12,10 +12,18 @@ const NUTRIENTS = ['energy_kj', 'protein_g', 'carbs_g', 'sugar_g', 'fat_g', 'sat
 const UNITS = ['each', 'g', 'kg', 'ml', 'l'];
 const SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
 
+$OP_ID = null;
+
 function out($data, int $code = 200): never
 {
+    global $OP_ID;
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+    if ($OP_ID !== null && $code === 200) {
+        // remember the answer so a replay of this change (sent again after a dropped connection) isn't applied twice
+        q('INSERT IGNORE INTO op_log (op_id, response) VALUES (?, ?)', [$OP_ID, $json]);
+    }
     http_response_code($code);
-    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+    echo $json;
     exit;
 }
 
@@ -469,6 +477,20 @@ if (!is_array($in)) {
 $uid = (int)$user['id'];
 $action = (string)($in['action'] ?? '');
 run_migrations();
+
+// an offline change carries an op_id; if we've already applied it, answer the same way again
+if (isset($in['op_id']) && preg_match('/^[0-9a-f-]{36}$/', (string)$in['op_id'])) {
+    $done = q('SELECT response FROM op_log WHERE op_id = ?', [$in['op_id']])->fetchColumn();
+    if ($done !== false) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo $done;
+        exit;
+    }
+    $OP_ID = $in['op_id'];
+    if (random_int(1, 50) === 1) {
+        q('DELETE FROM op_log WHERE created_at < NOW() - INTERVAL 14 DAY');
+    }
+}
 
 try {
     switch ($action) {
