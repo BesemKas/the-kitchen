@@ -44,10 +44,20 @@ function str_in(array $in, string $key, int $max, bool $required = false): ?stri
     return mb_substr($v, 0, $max);
 }
 
+/** "12,50", "R 1 234,50" or "12.50" → "12.50": South African keypads type a decimal comma. */
+function decimal_str($v): string
+{
+    $v = preg_replace('/[\sR\x{00A0}]/u', '', (string)$v);
+    return str_contains($v, ',') && !str_contains($v, '.') ? str_replace(',', '.', $v) : str_replace(',', '', $v);
+}
+
 function num_in(array $in, string $key, ?float $default = null, float $min = 0, float $max = 1e9): ?float
 {
     if (!isset($in[$key]) || $in[$key] === '' || $in[$key] === null) {
         return $default;
+    }
+    if (is_string($in[$key])) {
+        $in[$key] = decimal_str($in[$key]);
     }
     if (!is_numeric($in[$key])) {
         fail("$key must be a number");
@@ -740,6 +750,168 @@ function off_lookup(string $barcode): ?array
     return is_array($data) ? off_parse($data) : null;
 }
 
+/* ----- giving back to Open Food Facts ----- */
+
+/** Set up once a global app account is in config (off_user / off_password); otherwise sharing stays off. */
+function off_ready(): bool
+{
+    return function_exists('curl_init') && (string)config('off_user', '') !== '' && (string)config('off_password', '') !== '';
+}
+
+/** A real retail barcode (not a shop's own weighed-item code starting with 2). */
+function shareable_barcode(?string $b): bool
+{
+    return $b !== null && preg_match('/^(\d{8}|\d{12,14})$/', $b) === 1 && $b[0] !== '2' && !str_starts_with($b, '02');
+}
+
+function off_http(string $path, ?array $post = null): array
+{
+    $base = rtrim((string)config('off_base', 'https://world.openfoodfacts.org'), '/');
+    $ch = curl_init($base . $path);
+    $opts = [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 20,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_USERAGENT => 'KitchenBudget/1.0 (' . (string)config('off_contact', 'kitchen budget app') . ')',
+    ];
+    if ((string)config('off_basic_auth', '') !== '') {
+        $opts[CURLOPT_USERPWD] = (string)config('off_basic_auth');   // the staging server wants off:off
+    }
+    if ($post !== null) {
+        $opts[CURLOPT_POST] = true;
+        $opts[CURLOPT_POSTFIELDS] = $post;   // an array: sent as multipart, so photos can ride along
+    }
+    curl_setopt_array($ch, $opts);
+    $body = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err = curl_error($ch);
+    curl_close($ch);
+    if ($body === false) {
+        throw new RuntimeException('Open Food Facts unreachable: ' . $err);
+    }
+    return [$code, (string)$body];
+}
+
+/** Numbers a real label could have; anything else isn't sent. */
+function off_plausible(array $p): bool
+{
+    $limits = ['energy_kj' => 3800, 'protein_g' => 100, 'carbs_g' => 100, 'sugar_g' => 100, 'fat_g' => 100, 'satfat_g' => 100, 'fibre_g' => 100, 'sodium_mg' => 40000];
+    foreach ($limits as $k => $max) {
+        if ($p[$k] !== null && ((float)$p[$k] < 0 || (float)$p[$k] > $max)) {
+            return false;
+        }
+    }
+    if ($p['sugar_g'] !== null && $p['carbs_g'] !== null && (float)$p['sugar_g'] > (float)$p['carbs_g'] + 0.5) {
+        return false;
+    }
+    if ($p['satfat_g'] !== null && $p['fat_g'] !== null && (float)$p['satfat_g'] > (float)$p['fat_g'] + 0.5) {
+        return false;
+    }
+    return (float)($p['protein_g'] ?? 0) + (float)($p['carbs_g'] ?? 0) + (float)($p['fat_g'] ?? 0) <= 105;
+}
+
+/**
+ * Add what Open Food Facts is missing about one product: only empty fields are filled, nothing of theirs is overwritten.
+ * Returns 'sent', 'exists' (they already had everything) or 'skipped' (nothing worth sending).
+ */
+function off_contribute(int $productId, ?int $userId): string
+{
+    $p = q('SELECT * FROM products WHERE id = ?', [$productId])->fetch();
+    if (!$p || !shareable_barcode($p['barcode']) || mb_strlen(trim((string)$p['name'])) < 3) {
+        return 'skipped';
+    }
+    [$code, $body] = off_http('/api/v2/product/' . $p['barcode'] . '.json?fields=product_name,brands,quantity,nutriments,ingredients_text,ingredients_text_en,image_front_url,image_nutrition_url,image_ingredients_url');
+    $d = json_decode($body, true);
+    if (!is_array($d) || ($code !== 200 && $code !== 404)) {
+        throw new RuntimeException("Open Food Facts lookup failed ($code)");
+    }
+    $have = (int)($d['status'] ?? 0) === 1 ? (array)($d['product'] ?? []) : [];
+    $empty = fn($k) => trim((string)($have[$k] ?? '')) === '';
+    $auth = [
+        'code' => $p['barcode'],
+        'user_id' => (string)config('off_user'),
+        'password' => (string)config('off_password'),
+        'app_name' => 'KitchenBudget',
+        'app_version' => '1',
+        // a salted id per person, so Open Food Facts can block one bad contributor without blocking the app; no name or email is sent
+        'app_uuid' => substr(hash_hmac('sha256', 'off:' . (int)$userId, (string)config('off_password')), 0, 32),
+        'comment' => 'Added with the Kitchen Budget app (South Africa)',
+    ];
+    $f = [];
+    if ($empty('product_name')) {
+        $f['product_name_en'] = trim((string)$p['name']);
+    }
+    if ($empty('brands') && trim((string)$p['brand']) !== '') {
+        $f['add_brands'] = trim((string)$p['brand']);
+    }
+    if ($empty('quantity') && $p['unit'] !== 'each' && (float)$p['pack_size'] > 0) {
+        $f['quantity'] = rtrim(rtrim(number_format((float)$p['pack_size'], 3, '.', ''), '0'), '.') . ' ' . $p['unit'];
+    }
+    if ($empty('ingredients_text') && $empty('ingredients_text_en') && trim((string)$p['ingredients']) !== '') {
+        $f['ingredients_text_en'] = trim((string)$p['ingredients']);
+    }
+    $n = (array)($have['nutriments'] ?? []);
+    $theirs = isset($n['energy_100g']) || isset($n['energy-kj_100g']) || isset($n['proteins_100g']);
+    $ours = $p['energy_kj'] !== null || $p['protein_g'] !== null;
+    if (!$theirs && $ours && $p['unit'] !== 'each' && off_plausible($p)) {
+        $f['nutrition_data_per'] = '100g';
+        $map = ['energy_kj' => ['energy-kj', 'kJ'], 'protein_g' => ['proteins', 'g'], 'carbs_g' => ['carbohydrates', 'g'], 'sugar_g' => ['sugars', 'g'],
+                'fat_g' => ['fat', 'g'], 'satfat_g' => ['saturated-fat', 'g'], 'fibre_g' => ['fiber', 'g'], 'sodium_mg' => ['sodium', 'mg']];
+        foreach ($map as $col => [$name, $unit]) {
+            if ($p[$col] !== null) {
+                $f["nutriment_$name"] = (string)(float)$p[$col];
+                $f["nutriment_{$name}_unit"] = $unit;
+            }
+        }
+    }
+    // label photos they don't have yet (CC BY-SA once uploaded)
+    $slots = ['front' => ['front_en', 'image_front_url'], 'label' => ['nutrition_en', 'image_nutrition_url'], 'ingredients' => ['ingredients_en', 'image_ingredients_url']];
+    $photos = [];
+    foreach (q('SELECT kind, mime, data FROM product_photos WHERE product_id = ?', [$productId])->fetchAll() as $ph) {
+        [$field, $theirUrl] = $slots[$ph['kind']] ?? [null, null];
+        if ($field && $empty($theirUrl)) {
+            $photos[$field] = $ph;
+        }
+    }
+    if (!$f && !$photos) {
+        return $have ? 'exists' : 'skipped';
+    }
+    if ($f || !$have) {
+        $f['add_countries'] = 'South Africa';
+        [$c, $b] = off_http('/cgi/product_jqm2.pl', $auth + $f + ['lc' => 'en', 'cc' => 'za']);
+        $r = json_decode($b, true);
+        if ($c !== 200 || (int)($r['status'] ?? 0) !== 1) {
+            throw new RuntimeException('Open Food Facts said: ' . mb_substr((string)($r['status_verbose'] ?? "HTTP $c"), 0, 150));
+        }
+    }
+    foreach ($photos as $field => $ph) {
+        $tmp = tempnam(sys_get_temp_dir(), 'off');
+        file_put_contents($tmp, base64_decode($ph['data']));
+        try {
+            [$c, $b] = off_http('/cgi/product_image_upload.pl', $auth + ['imagefield' => $field, "imgupload_$field" => new CURLFile($tmp, $ph['mime'], 'label.jpg')]);
+        } finally {
+            @unlink($tmp);
+        }
+        $r = json_decode($b, true);
+        if ($c !== 200 || (($r['status'] ?? '') !== 'status ok' && empty($r['image']))) {
+            throw new RuntimeException('Photo upload failed: ' . mb_substr((string)($r['error'] ?? $r['status'] ?? "HTTP $c"), 0, 150));
+        }
+    }
+    return 'sent';
+}
+
+/** Queue a product for sharing, if the person said yes and it has a real barcode. */
+function off_queue(int $productId, int $userId): bool
+{
+    $bc = q('SELECT barcode FROM products WHERE id = ?', [$productId])->fetchColumn();
+    if (!off_ready() || !shareable_barcode($bc ?: null)) {
+        return false;
+    }
+    q("INSERT INTO off_contributions (product_id, user_id, status, attempts) VALUES (?, ?, 'pending', 0)
+       ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), status = 'pending', attempts = 0, last_error = NULL", [$productId, $userId]);
+    return true;
+}
+
 function off_parse(array $data): ?array
 {
     if ((int)($data['status'] ?? 0) !== 1 || empty($data['product'])) {
@@ -871,6 +1043,8 @@ try {
                 'is_admin' => !empty($user['is_admin']),
                 'signups_open' => setting('signups_open', '1') === '1',
                 'household' => household_view($uid),
+                'off_ready' => off_ready(),
+                'off_share' => user_setting('off_share', ''),
                 'month' => $month,
                 'currency' => config('currency', 'R'),
             ]);
@@ -1033,6 +1207,7 @@ try {
                 if ($price === '' || $price === null) {
                     continue;
                 }
+                $price = is_string($price) ? decimal_str($price) : $price;
                 if (!ctype_digit((string)$storeId) || !is_numeric($price) || $price < 0 || $price > 1e6) {
                     fail('Bad price');
                 }
@@ -1614,6 +1789,7 @@ try {
                 'ingredient_alerts' => $mine('SELECT code, mode FROM ingredient_alerts WHERE user_id = ?'),
                 'my_recipes' => array_values(array_filter(recipes_with_costs(), fn($r) => $r['mine'])),
                 'household' => household_view($uid),
+                'products_you_shared_with_open_food_facts' => $mine('SELECT p.barcode, p.name, c.status, c.updated_at FROM off_contributions c JOIN products p ON p.id = c.product_id WHERE c.user_id = ?'),
                 'shops_you_logged_for_your_household' => $mine('SELECT trip_date, kind, total, estimate, note FROM trips WHERE added_by = ? AND user_id <> added_by'),
             ]]);
 
@@ -1638,6 +1814,45 @@ try {
             db()->commit();
             log_out();
             out(['ok' => true]);
+
+        // ----- sharing products with Open Food Facts -----
+        case 'off.consent':
+            set_user_setting('off_share', !empty($in['share']) ? '1' : '0');
+            $queued = !empty($in['share']) && ($pid = int_in($in, 'product_id', false)) ? off_queue($pid, $uid) : false;
+            out(['off_share' => !empty($in['share']) ? '1' : '0', 'queued' => $queued]);
+
+        case 'off.queue':
+            user_setting('off_share', '') === '1' || fail('You chose not to share products');
+            out(['queued' => off_queue(int_in($in, 'product_id'), $uid)]);
+
+        case 'off.sync':
+            // sends a few waiting products; the app calls this quietly in the background
+            if (!off_ready()) {
+                out(['ready' => false]);
+            }
+            if (!(int)db()->query("SELECT GET_LOCK('kitchen_off', 0)")->fetchColumn()) {
+                out(['busy' => true]);
+            }
+            $done = [];
+            try {
+                $rows = q("SELECT product_id, user_id, attempts FROM off_contributions
+                           WHERE status = 'pending' AND updated_at <= NOW() - INTERVAL (attempts * 15) MINUTE ORDER BY updated_at LIMIT 3")->fetchAll();
+                foreach ($rows as $r) {
+                    try {
+                        $st = off_contribute((int)$r['product_id'], $r['user_id'] === null ? null : (int)$r['user_id']);
+                        q('UPDATE off_contributions SET status = ?, last_error = NULL WHERE product_id = ?', [$st, $r['product_id']]);
+                    } catch (Throwable $e) {
+                        $tries = (int)$r['attempts'] + 1;
+                        q('UPDATE off_contributions SET status = ?, attempts = ?, last_error = ? WHERE product_id = ?',
+                            [$tries >= 5 ? 'failed' : 'pending', $tries, mb_substr($e->getMessage(), 0, 250), $r['product_id']]);
+                        $st = 'error';
+                    }
+                    $done[] = ['product_id' => (int)$r['product_id'], 'status' => $st];
+                }
+            } finally {
+                db()->query("SELECT RELEASE_LOCK('kitchen_off')");
+            }
+            out(['done' => $done]);
 
         // ----- households -----
         case 'household.get':
@@ -1722,6 +1937,7 @@ try {
                                       (SELECT COUNT(*) FROM recipes r WHERE r.user_id = u.id) recipes,
                                       (SELECT COUNT(*) FROM trips t WHERE t.user_id = u.id) trips
                                FROM users u WHERE u.is_kitchen = 0 ORDER BY u.created_at')->fetchAll(),
+                'off' => off_ready() ? q('SELECT status, COUNT(*) n FROM off_contributions GROUP BY status')->fetchAll(PDO::FETCH_KEY_PAIR) : null,
                 'signups_open' => setting('signups_open', '1') === '1']);
 
         case 'admin.reset':

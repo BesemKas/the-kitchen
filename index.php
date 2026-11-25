@@ -148,7 +148,7 @@ if ($user && $page !== 'privacy') {
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
-<link rel="stylesheet" href="assets/app.css?v=16">
+<link rel="stylesheet" href="assets/app.css?v=17">
 </head>
 <?php if (!$user || $page === 'privacy'): ?>
 <body class="auth">
@@ -162,6 +162,7 @@ if ($user && $page !== 'privacy') {
     <p>Kitchen Budget is a small personal app. It keeps what you type or scan: your username, display name, a hashed password (nobody can read it), shopping lists, shops and prices, meal plans, cooked portions, budget, takeaways, ingredient alerts and the recipes you add.</p>
     <p><b>Who sees it:</b> only you, unless you join a household. In a household everyone sees each other's recipes and the people's names; if the household shares its kitchen, the shopping list, pantry, shops and prices, meal plan, fridge and grocery budget are shared too (your takeaways, ingredient alerts and targets stay yours). Product facts (names, barcodes, nutrition, label photos) are shared with everyone so a scan helps all users. Recipes are private unless you tap “Share with everyone”.</p>
     <p><b>Where it lives:</b> on the app's web host in a MySQL database, with nightly backups. It is never sold or shared. Barcodes are looked up on Open Food Facts; if label reading is switched on, label photos are sent to Anthropic's Claude to read the numbers.</p>
+    <p><b>Open Food Facts:</b> only if you say yes, products you add (name, brand, pack size, ingredients, nutrition and label photos) are added to Open Food Facts, a free public food database. Once there they are public under open licences (ODbL for the data, CC BY-SA for photos). Your name, prices, lists, plans and budget are never sent. You can switch this off under Budget → Settings.</p>
     <p><b>Your rights:</b> under Budget → Settings you can download everything the app holds about you, or delete your account and all your data.</p>
   </div>
   <a class="btn" href="./">Back</a>
@@ -224,7 +225,7 @@ if ($user && $page !== 'privacy') {
 <div id="sheet" class="sheet" hidden><div class="sheet-body" id="sheetBody"></div></div>
 <div id="toast" class="toast" hidden></div>
 <script src="assets/zxing-browser.min.js"></script>
-<script src="assets/app.js?v=16"></script>
+<script src="assets/app.js?v=17"></script>
 </body>
 <?php endif; ?>
 </html>

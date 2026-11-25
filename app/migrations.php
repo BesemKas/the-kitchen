@@ -225,6 +225,20 @@ const MIGRATIONS = [
         "ALTER TABLE trips ADD COLUMN added_by INT UNSIGNED NULL, ADD FOREIGN KEY (added_by) REFERENCES users(id) ON DELETE SET NULL",
         "UPDATE trips SET added_by = user_id",
     ],
+    // products people agreed to share with Open Food Facts, sent a few at a time
+    12 => [
+        "CREATE TABLE IF NOT EXISTS off_contributions (
+            product_id INT UNSIGNED NOT NULL PRIMARY KEY,
+            user_id INT UNSIGNED NULL,
+            status VARCHAR(10) NOT NULL DEFAULT 'pending',
+            attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+            last_error VARCHAR(255) NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX (status, updated_at),
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB",
+    ],
 ];
 
 function schema_version(): int

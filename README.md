@@ -177,3 +177,14 @@ Budget → Household. Start a household, then **Invite someone**: the link works
 - **Shared kitchen**: one shopping list, pantry, set of shops and prices, meal plan, fridge and grocery budget (and payday) for the whole household. Takeaways, ingredient alerts and protein/kJ targets stay personal. The first time a household shares, its kitchen starts as a copy of the kitchen of whoever switched it on. Your own kitchen is kept and comes back if you switch to Separate or leave.
 
 How it works: a shared kitchen belongs to a hidden "kitchen" account (it can't log in and isn't shown on the admin page), so anyone can leave without taking the household's data with them. The person who started the household can remove people; when they leave, the longest member takes over. The last person to leave closes the household and deletes its shared kitchen.
+
+## Sharing products with Open Food Facts
+
+Many South African products aren't in Open Food Facts yet. When someone saves a product with a real barcode, the app asks once whether it may add the products they save there (Budget → Settings has the switch).
+
+- Only what Open Food Facts is missing is sent: name, brand, pack size, ingredients, nutrition per 100 g and label photos. Nothing of theirs is overwritten.
+- Never sent: names, prices, lists, plans, budgets. Each person gets a salted random id (`app_uuid`), so Open Food Facts can block one bad contributor without blocking the app.
+- Shops' own barcodes (starting with 2, for weighed items) are never sent, and nutrition that can't be real (like 200 g protein per 100 g) is left out.
+- Products are sent a few at a time in the background and retried with a growing wait if Open Food Facts is down. The admin page shows how many were added.
+
+To switch it on, make one account for the app at openfoodfacts.org and add `off_user`, `off_password` and `off_contact` to `app/config.php` (see `config.sample.php`). Try the test server first (`off_base` = `https://world.openfoodfacts.net`, `off_basic_auth` = `off:off`, with an account made on the test server). Without these settings the feature stays hidden.
