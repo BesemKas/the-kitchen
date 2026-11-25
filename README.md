@@ -168,3 +168,12 @@ A shared recipe is costed with the prices of the person looking at it.
 - **Products** stay shared. Only the person who added a product (or an admin) can delete it.
 - **Your data** (POPIA): Budget → Settings → Download my data (JSON) or Delete my account. The privacy page is at `./?privacy`.
 - New accounts get a welcome screen for budget, payday and protein target.
+
+## Households
+
+Budget → Household. Start a household, then **Invite someone**: the link works once, for 7 days, and the person can sign up from it even when sign-ups are closed. One household per person; up to 8 people.
+
+- **Separate** (the default): everyone keeps their own list, plan and budget. Everyone in the household sees each other's recipes; only the person who added a recipe can change it.
+- **Shared kitchen**: one shopping list, pantry, set of shops and prices, meal plan, fridge and grocery budget (and payday) for the whole household. Takeaways, ingredient alerts and protein/kJ targets stay personal. The first time a household shares, its kitchen starts as a copy of the kitchen of whoever switched it on. Your own kitchen is kept and comes back if you switch to Separate or leave.
+
+How it works: a shared kitchen belongs to a hidden "kitchen" account (it can't log in and isn't shown on the admin page), so anyone can leave without taking the household's data with them. The person who started the household can remove people; when they leave, the longest member takes over. The last person to leave closes the household and deletes its shared kitchen.
