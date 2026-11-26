@@ -592,3 +592,22 @@ input.center { text-align: center; }
 
 /* numbers the label reader filled in: highlighted until checked or edited */
 input.filled, textarea.filled { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
+
+/* nutrition laid out like a South African label: "of which" rows indented under their total */
+.label-table { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.lt-row { display: grid; grid-template-columns: minmax(0, 1fr) 7.5em 2.2em; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line); margin: 0; font-size: 14px; }
+.lt-row .lt-name { line-height: 1.25; }
+.lt-row.sub .lt-name { padding-left: 14px; color: var(--muted); font-size: 13px; }
+.lt-row input { text-align: right; padding: 8px 10px; }
+.lt-row .lt-unit { color: var(--muted); font-size: 13px; }
+.nt.label-view { grid-template-columns: 1fr; }
+.nt.label-view > div.sub span { padding-left: 14px; font-size: 12px; }
+input.guessed { border-color: var(--warn); box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 30%, transparent); }
+
+/* choosing the nutrition table on a label photo */
+.crop-wrap { position: relative; touch-action: none; user-select: none; -webkit-user-select: none; border-radius: 12px; overflow: hidden; }
+.crop-wrap img { display: block; width: 100%; height: auto; pointer-events: none; }
+.crop-box { position: absolute; border: 2px solid var(--accent); box-shadow: 0 0 0 9999px rgb(0 0 0 / .45); cursor: move; }
+.crop-box .h { position: absolute; width: 28px; height: 28px; background: var(--accent); border-radius: 50%; border: 3px solid #000; }
+.crop-box .h.tl { left: -15px; top: -15px; } .crop-box .h.tr { right: -15px; top: -15px; }
+.crop-box .h.bl { left: -15px; bottom: -15px; } .crop-box .h.br { right: -15px; bottom: -15px; }

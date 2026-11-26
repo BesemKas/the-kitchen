@@ -348,6 +348,10 @@ const MIGRATIONS = [
         "ALTER TABLE stores DROP COLUMN branch_id",
         "DROP TABLE branches",
     ],
+    // the rest of a South African label: trans, mono- and polyunsaturated fat, cholesterol (per 100 g)
+    20 => [
+        "ALTER TABLE products ADD COLUMN transfat_g DECIMAL(7,2) NULL, ADD COLUMN monofat_g DECIMAL(7,2) NULL, ADD COLUMN polyfat_g DECIMAL(7,2) NULL, ADD COLUMN cholesterol_mg DECIMAL(8,1) NULL",
+    ],
 ];
 
 function schema_version(): int
