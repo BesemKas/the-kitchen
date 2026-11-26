@@ -326,6 +326,28 @@ const MIGRATIONS = [
     18 => [
         "ALTER TABLE pantry ADD COLUMN skip_again TINYINT(1) NOT NULL DEFAULT 0",
     ],
+    // Prices are the same at every branch of a chain and differ between chains (Boxer vs Checkers):
+    // a shop now just says which chain it is, and prices are shared within that chain. Branches go.
+    19 => [
+        "ALTER TABLE stores ADD COLUMN chain VARCHAR(40) NULL, ADD INDEX (chain)",
+        "UPDATE stores s JOIN branches b ON b.id = s.branch_id SET s.chain = CASE b.chain WHEN 'Checkers Hyper' THEN 'Checkers' WHEN 'Pick n Pay Hyper' THEN 'Pick n Pay' WHEN 'Superspar' THEN 'Spar' WHEN 'Kwikspar' THEN 'Spar' WHEN 'Other' THEN NULL ELSE b.chain END",
+        "UPDATE stores SET chain = CASE
+            WHEN LOWER(name) LIKE '%checkers%' THEN 'Checkers'
+            WHEN LOWER(name) LIKE '%shoprite%' THEN 'Shoprite'
+            WHEN LOWER(name) LIKE '%usave%' THEN 'Usave'
+            WHEN LOWER(name) LIKE '%pick n pay%' OR LOWER(name) LIKE '%pick ''n pay%' OR LOWER(name) LIKE '%picknpay%' OR LOWER(name) LIKE 'pnp%' THEN 'Pick n Pay'
+            WHEN LOWER(name) LIKE '%boxer%' THEN 'Boxer'
+            WHEN LOWER(name) LIKE '%woolworths%' OR LOWER(name) LIKE '%woolies%' THEN 'Woolworths'
+            WHEN LOWER(name) LIKE '%spar%' THEN 'Spar'
+            WHEN LOWER(name) LIKE '%food lover%' THEN 'Food Lover''s Market'
+            WHEN LOWER(name) LIKE '%makro%' THEN 'Makro'
+            WHEN LOWER(name) LIKE '%clicks%' THEN 'Clicks'
+            WHEN LOWER(name) LIKE '%dis-chem%' OR LOWER(name) LIKE '%dischem%' THEN 'Dis-Chem'
+            ELSE NULL END WHERE chain IS NULL",
+        'drop-fk:stores:branch_id',
+        "ALTER TABLE stores DROP COLUMN branch_id",
+        "DROP TABLE branches",
+    ],
 ];
 
 function schema_version(): int
@@ -351,6 +373,16 @@ function run_migrations(): void
                 continue;
             }
             foreach ($statements as $sql) {
+                if (str_starts_with($sql, 'drop-fk:')) {
+                    // a foreign key's name is made up by the database, so find it by table and column
+                    [, $table, $column] = explode(':', $sql);
+                    $name = db()->prepare('SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL');
+                    $name->execute([$table, $column]);
+                    foreach ($name->fetchAll(PDO::FETCH_COLUMN) as $fk) {
+                        db()->exec("ALTER TABLE `$table` DROP FOREIGN KEY `$fk`");
+                    }
+                    continue;
+                }
                 db()->exec($sql);
             }
             set_setting('schema_version', (string)$version);
