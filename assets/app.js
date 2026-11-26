@@ -3934,7 +3934,7 @@ async function renderBudget(mode = 'money') {
       <div class="row"><button class="btn small grow" data-act="export">Download my data</button><a class="btn small grow" href="./?privacy">How your data is kept</a></div>
       <button class="btn small danger block" data-act="delete-account">Delete my account</button>
     </section>
-    ${S.isAdmin ? '<section class="card stack"><h2>Running the app</h2><div class="row"><button class="btn grow" data-act="admin">People</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div><button class="btn block" data-act="off-import">Load South African products</button><p class="small muted" id="importStatus">From Open Food Facts into the shared catalogue, 100 at a time. Keep this screen open; it takes a while.</p></section>' : ''}
+    ${S.isAdmin ? '<section class="card stack"><h2>Running the app</h2><div class="row"><button class="btn grow" data-act="admin">People</button><button class="btn grow" data-act="pilot">Pilot numbers</button></div><button class="btn block" data-act="off-import">Load South African products</button><p class="small muted" id="importStatus">South African products from the Open Food Facts data export into the shared catalogue. Takes a minute or two; products already there only get missing details filled in.</p></section>' : ''}
     <p class="small muted" id="dispCheck"></p>
     <p class="small muted">Product names and nutrition partly come from <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a>, shared under the <a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank" rel="noopener">Open Database Licence</a>.</p>
 ` : `
@@ -4034,34 +4034,18 @@ async function renderBudget(mode = 'money') {
       if (t.dataset.act === 'feedback') return feedbackSheet();
       if (t.dataset.act === 'pilot') return pilotSheet();
       if (t.dataset.act === 'off-import') {
-        // one page every 7 seconds: Open Food Facts allows 10 searches a minute
+        // from the file on our own server (built from Open Food Facts' data export): no waiting, no limits
         const st = document.getElementById('importStatus');
         t.disabled = true;
-        let added = 0;
-        let tries = 0;
-        const WAITS = [30, 60, 120, 180, 300];   // seconds to wait after each busy answer in a row
-        const sleep = (sec) => new Promise((res) => setTimeout(res, sec * 1000));
-        for (;;) {
-          if (location.hash !== '#me') { toast('Loading paused. Tap the button again to carry on.'); break; }
-          let r;
-          try {
-            r = await post('admin.off_import', {}, 60000);   // their searches can take 30 s or more
-            tries = 0;
-          } catch (er) {
-            const busy = er.offline || er.status === 503 || er.status === 502 || er.status === 504;
-            if (!busy || tries >= WAITS.length) { st.textContent = `Stopped: ${er.message || 'no answer'}. Tap the button to carry on from the same page.`; break; }
-            const wait = WAITS[tries++];
-            for (let left = wait; left > 0 && location.hash === '#me'; left -= 5) {
-              st.textContent = `${er.message || 'No answer from Open Food Facts'}. Trying again in ${left} s (try ${tries} of ${WAITS.length}). ${added} new products so far.`;
-              await sleep(Math.min(5, left));
-            }
-            continue;
+        let from = 0; let added = 0; let updated = 0;
+        try {
+          for (;;) {
+            const r = await post('admin.off_import', { from }, 60000);
+            added += r.added; updated += r.updated; from = r.next;
+            st.textContent = `${from} products read: ${added} new, ${updated} already there and filled in. ${r.catalogue} in the catalogue.`;
+            if (r.done) { st.textContent += ` Done (file from ${r.file_date}).`; toast('South African products loaded'); break; }
           }
-          added += r.added;
-          st.textContent = `Page ${r.page} of ${r.pages}: ${added} new products so far, ${r.catalogue} in the catalogue.`;
-          if (r.done) { st.textContent += ' Done.'; toast('South African products loaded'); break; }
-          await new Promise((res) => setTimeout(res, 7000));
-        }
+        } catch (er) { st.textContent = `Stopped: ${er.message || 'no answer'}. Tap the button to try again.`; }
         t.disabled = false;
         return;
       }

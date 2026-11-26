@@ -809,26 +809,32 @@ function read_label(string $b64, string $mime): array
     return ['nutrition' => $n, 'column' => $col, 'ingredients' => $ing ?: null, 'additives' => additives_in($ing)];
 }
 
+/** A v3 product answer ({"status": "success", "product": {...}}) in the shape the parser reads ({"status": 1, ...}). */
+function off_v3(?string $body): ?array
+{
+    $d = $body ? json_decode($body, true) : null;
+    if (!is_array($d)) {
+        return null;
+    }
+    $found = ($d['status'] ?? '') === 'success' || ($d['status'] ?? '') === 'success_with_warnings' || (int)($d['status'] ?? 0) === 1;
+    return ['status' => $found && !empty($d['product']) ? 1 : 0, 'product' => (array)($d['product'] ?? [])];
+}
+
 function off_lookup(string $barcode): ?array
 {
     if (!function_exists('curl_init')) {
         return null;
     }
     $fields = 'product_name,brands,quantity,product_quantity,product_quantity_unit,nutriments,nutriscore_grade,nova_group,additives_tags,ingredients_text_en,ingredients_text';
-    $ch = curl_init('https://world.openfoodfacts.org/api/v2/product/' . rawurlencode($barcode) . '.json?fields=' . $fields);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 6,
-        CURLOPT_CONNECTTIMEOUT => 4,
-        CURLOPT_USERAGENT => 'KitchenBudget/1.0 (personal grocery app)',
-    ]);
-    $body = curl_exec($ch);
-    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    $data = $body ? json_decode($body, true) : null;
+    try {
+        [$code, $body] = off_http('/api/v3/product/' . rawurlencode($barcode) . '?fields=' . $fields, null, 6);
+    } catch (RuntimeException $e) {
+        [$code, $body] = [0, ''];
+    }
+    $data = off_v3($body);
     // remembered for the pilot numbers: found, missing (they don't have it) or error (couldn't ask)
-    $GLOBALS['off_last'] = is_array($data) && ($code === 200 || $code === 404) ? ((int)($data['status'] ?? 0) === 1 ? 'found' : 'missing') : 'error';
-    if ($code !== 200 || !is_array($data)) {
+    $GLOBALS['off_last'] = $data !== null && ($code === 200 || $code === 404) ? ((int)$data['status'] === 1 ? 'found' : 'missing') : 'error';
+    if ($code !== 200 || $data === null) {
         return null;
     }
     return off_parse($data);
@@ -856,7 +862,7 @@ function off_http(string $path, ?array $post = null, int $timeout = 20): array
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT => $timeout,
         CURLOPT_CONNECTTIMEOUT => 5,
-        CURLOPT_USERAGENT => 'KitchenBudget/1.0 (' . (string)config('off_contact', 'kitchen budget app') . ')',
+        CURLOPT_USERAGENT => 'KitchenBudget/1.0 (' . (string)config('off_contact', 'trueideonline.co.za') . ')',   // their rule: AppName/Version (ContactEmail)
     ];
     if ((string)config('off_basic_auth', '') !== '') {
         $opts[CURLOPT_USERPWD] = (string)config('off_basic_auth');   // the staging server wants off:off
@@ -903,8 +909,8 @@ function off_contribute(int $productId, ?int $userId): string
     if (!$p || !shareable_barcode($p['barcode']) || mb_strlen(trim((string)$p['name'])) < 3) {
         return 'skipped';
     }
-    [$code, $body] = off_http('/api/v2/product/' . $p['barcode'] . '.json?fields=product_name,brands,quantity,nutriments,ingredients_text,ingredients_text_en,image_front_url,image_nutrition_url,image_ingredients_url');
-    $d = json_decode($body, true);
+    [$code, $body] = off_http('/api/v3/product/' . $p['barcode'] . '?fields=product_name,brands,quantity,nutriments,ingredients_text,ingredients_text_en,image_front_url,image_nutrition_url,image_ingredients_url');
+    $d = off_v3($body);
     if (!is_array($d) || ($code !== 200 && $code !== 404)) {
         throw new RuntimeException("Open Food Facts lookup failed ($code)");
     }
@@ -1333,10 +1339,16 @@ try {
             // name search for big catalogues: things you've bought first, then names that start with the words, then the rest
             $term = trim(mb_strtolower(str_in($in, 'q', 60) ?? ''));
             mb_strlen($term) >= 2 || out(['products' => []]);
-            $like = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $term) . '%';
+            // every word has to match ("jungle oats"); words that start a word in the name or brand rank first
+            $esc = fn($w) => str_replace(['%', '_'], ['\\%', '\\_'], $w);
+            $words = array_slice(array_values(array_filter(preg_split('/\s+/', $term))), 0, 4);
+            $text = "LOWER(CONCAT_WS(' ', p.name, p.brand))";
+            $where = implode(' AND ', array_fill(0, count($words), "$text LIKE ?"));
+            $params = [$kid, ...array_map(fn($w) => '%' . $esc($w) . '%', $words), $esc($term) . '%', '% ' . $esc($words[0]) . '%'];
             $rows = q("SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought, pa.updated_at pantry_at, pa.skip_again FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ?
-                       WHERE LOWER(CONCAT_WS(' ', p.name, p.brand)) LIKE ?
-                       ORDER BY COALESCE(pa.bought_count, 0) > 0 DESC, LOWER(p.name) LIKE ? DESC, p.name LIMIT 25", [$kid, $like, $term . '%'])->fetchAll();
+                       WHERE $where
+                       ORDER BY COALESCE(pa.bought_count, 0) > 0 DESC, LOWER(p.name) LIKE ? DESC, CONCAT(' ', $text) LIKE ? DESC, p.energy_kj IS NOT NULL DESC, p.name
+                       LIMIT 25", $params)->fetchAll();
             $prices = latest_prices(array_map(fn($r) => (int)$r['id'], $rows));
             out(['products' => array_map(fn($r) => product_row($r, $prices), $rows)]);
 
@@ -2360,32 +2372,24 @@ try {
             out(['household' => null]);
 
         case 'admin.off_import':
-            // load one page (100) of South African products from Open Food Facts into the shared catalogue;
-            // the app calls this every 7 seconds, inside their limit of 10 searches a minute
+            // load South African products from data/off-za.jsonl.gz (built from Open Food Facts' data export by a
+            // GitHub Action) into the shared catalogue, 400 lines per call; no calls to Open Food Facts at all
             empty($user['is_admin']) && fail('Admins only', 403);
-            function_exists('curl_init') || fail('This server cannot reach Open Food Facts');
-            $page = int_in($in, 'page', false) ?: (int)setting('off_import_page', '1');
-            $fields = 'code,product_name,brands,quantity,product_quantity,product_quantity_unit,nutriments,nutriscore_grade,nova_group,additives_tags,ingredients_text_en,ingredients_text';
-            // Open Food Facts answers 503 whenever its shared search limit is used up; the app waits and tries again
-            try {
-                [$code, $body] = off_http("/api/v2/search?countries_tags=en:south-africa&fields=$fields&page_size=100&page=$page", null, 45);
-            } catch (RuntimeException $e) {
-                [$code, $body] = [0, ''];
-            }
-            $d = json_decode($body, true);
-            if ($code !== 200 || !is_array($d)) {
-                fail($code === 0 ? 'Open Food Facts took too long to answer' : "Open Food Facts is busy (HTTP $code)", 503);
-            }
-            $added = $updated = 0;
-            foreach ((array)($d['products'] ?? []) as $op) {
+            $file = __DIR__ . '/data/off-za.jsonl.gz';
+            is_readable($file) || fail("The South African product file isn't on the server yet. On GitHub, run the action \"South African products from Open Food Facts\", then deploy.", 404);
+            $from = int_in($in, 'from', false) ?: 0;
+            $gz = gzopen($file, 'rb');
+            $line = 0; $added = $updated = $skipped = 0; $done = true;
+            while (($raw = gzgets($gz, 1 << 20)) !== false) {
+                if ($line++ < $from) {
+                    continue;
+                }
+                if ($line > $from + 400) { $done = false; $line--; break; }
+                $op = json_decode($raw, true);
                 $bc = preg_replace('/\D/', '', (string)($op['code'] ?? ''));
-                if (!shareable_barcode($bc)) {
-                    continue;
-                }
+                if (!is_array($op) || !shareable_barcode($bc)) { $skipped++; continue; }
                 $s = off_parse(['status' => 1, 'product' => $op]);
-                if (!$s || !$s['name']) {
-                    continue;
-                }
+                if (!$s || !$s['name']) { $skipped++; continue; }
                 $id = q('SELECT id FROM products WHERE barcode = ?', [$bc])->fetchColumn();
                 if ($id) {
                     apply_off((int)$id, $s);   // fills only what's missing
@@ -2399,11 +2403,9 @@ try {
                 q('INSERT INTO products (' . implode(', ', array_keys($cols)) . ', off_checked_at) VALUES (' . implode(', ', array_fill(0, count($cols), '?')) . ', NOW())', array_values($cols));
                 $added++;
             }
-            $total = (int)($d['count'] ?? 0);
-            $done = $page * 100 >= $total || empty($d['products']);
-            set_setting('off_import_page', (string)($done ? 1 : $page + 1));
-            out(['page' => $page, 'pages' => max(1, (int)ceil($total / 100)), 'added' => $added, 'updated' => $updated, 'total' => $total, 'done' => $done,
-                 'catalogue' => (int)q('SELECT COUNT(*) FROM products')->fetchColumn()]);
+            gzclose($gz);
+            out(['from' => $from, 'next' => $line, 'added' => $added, 'updated' => $updated, 'skipped' => $skipped, 'done' => $done,
+                 'file_date' => date('Y-m-d', (int)filemtime($file)), 'catalogue' => (int)q('SELECT COUNT(*) FROM products')->fetchColumn()]);
 
         case 'admin.users':
             empty($user['is_admin']) && fail('Admins only', 403);

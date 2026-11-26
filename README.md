@@ -235,9 +235,12 @@ Exact grams at home drift from the first snack, so the app shows a rough state i
 
 Everyone shares one product catalogue (names, barcodes, pack sizes, nutrition). Prices stay with each person's own shops.
 
-- **Loading South African products.** An admin can tap *Me → Running the app → Load South African products*. It pulls their South African products, 100 at a time, one page every 7 seconds (inside their limit of 10 searches a minute). Keep the screen open; leave it and it pauses, and the next tap carries on from the same page. Products that already exist only get missing details filled in.
+- **South African products** come from Open Food Facts' data export, not their API (they ask that anything over a few hundred products comes from the export, and their search API answers 503 when busy). The GitHub Action **South African products from Open Food Facts** (`.github/workflows/off-za.yml`, script `tools/off_za_export.py`) downloads their Parquet export once, keeps products sold in South Africa (English text first) and saves `data/off-za.jsonl.gz`. It runs on the 1st of every month and can be started by hand under Actions → Run workflow. It commits the file to main: deploy afterwards.
+- **Loading it**: *Me → Running the app → Load South African products* reads that file on the server in batches (a minute or two, no calls to Open Food Facts). Products already in the catalogue only get missing details filled in. Run it again after each monthly update.
+- `data/` can't be downloaded from the web (`data/.htaccess`); the licence note is in `data/README.md` (ODbL).
 - **What you see.** Loaded products (`source = 'off'`) don't fill up your Kitchen. They show there once you use one: on your list, in your pantry, priced at your shop, in a household recipe, or in your diary.
-- **Search reaches everything.** Searching in Kitchen, the shopping list's add box and the recipe editor also asks the server, so the whole catalogue is two letters away.
+- **Search reaches everything.** Every word must match ("jungle oats"); names starting with what you typed come first, then products with nutrition.
+- **Product lookups** by barcode use the Open Food Facts API v3 from the server. Their limit is 15 lookups a minute per IP, and all users share the server's IP; products already in the catalogue never hit their API.
 - Open Food Facts data is ODbL: the credit and licence link sit at the bottom of the Me page; keep them there.
 
 ## Prices shared by shop name
