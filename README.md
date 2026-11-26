@@ -278,10 +278,14 @@ When Open Food Facts has no grade for a product, the app works one out from the 
 
 ## Scanning a label
 
-In the product editor, **Scan the label** reads a photo of the nutrition table (or the ingredients list) on the phone with Tesseract (open source, `assets/ocr`, licences in `assets/ocr/LICENSE.md`). Nothing is sent anywhere to read it, and it costs nothing.
+The nutrition form follows a South African label: Energy, Protein, Carbohydrate (of which total sugar), Total fat (of which saturated, trans, mono- and poly-unsaturated fat), Cholesterol, Dietary fibre, Total sodium. Trans, mono, poly and cholesterol are optional and only show on the product page when known.
 
-- The first scan downloads the reader once (about 8 MB, compressed by the server); after that it's on the phone.
-- It finds each row (energy, protein, carbohydrate, sugar, fat, saturated fat, fibre, sodium or salt) and takes the **per 100 g** column, whichever side it's on. kcal is converted to kJ, salt to sodium, and decimal commas and common misreads ("(g)" read as "(9)", O for 0) are fixed.
-- Filled numbers are highlighted until checked or edited, and the energy add-up check runs on them, which catches most misread decimals. Nothing is saved until you tap Save.
-- A photo of the ingredients list fills the ingredients from "Ingredients:" up to the allergens or storage text.
-- If `anthropic_key` is set in config.php, the server-side reader is used instead (paid, off by default).
+In the product editor, **Scan the label** reads a photo on the phone with Tesseract (open source, `assets/ocr`, licences in `assets/ocr/LICENSE.md`). Nothing is sent anywhere and it costs nothing.
+
+1. The whole photo is read once, for the ingredients and to find the nutrition table.
+2. You get the photo with a box around the table it found: drag the corners so the box holds just the table (heading to sodium row, no barcode or dates).
+3. That part is read five times at different sizes and each row takes the value at least two readings agree on. A row nobody agrees on stays empty rather than wrong.
+
+The parser matches rows by name, places rows whose names didn't read by the label's fixed order, takes the per 100 g column (only numbers with a unit count as columns, so dates are ignored), uses the per serving column to catch lost decimal points, and fixes common misreads ("(g)" read as "(9)", "16.48" for 16.4 g, "05" for 0.5, "ME" for mg). Filled numbers are highlighted; ones worked out from the per serving column are orange. The energy check says when the numbers don't add up, including when the label itself is off.
+
+Honest limit: Tesseract is weak on narrow fonts and dotted leader lines. On a real cheese label a well-placed box read 9 of 12 rows with none wrong, a loosely placed one 3–5. Always check before saving. The planned mobile app's on-device reader (ML Kit) is much stronger; the paid server reader (`anthropic_key` in config.php) is used instead when set.

@@ -8,7 +8,10 @@ header('Cache-Control: no-store');
 send_security_headers();
 start_session();
 
-const NUTRIENTS = ['energy_kj', 'protein_g', 'carbs_g', 'sugar_g', 'fat_g', 'satfat_g', 'fibre_g', 'sodium_mg'];
+// in the order of a South African label (R146): the "of which" rows sit under their total
+const NUTRIENTS = ['energy_kj', 'protein_g', 'carbs_g', 'sugar_g', 'fat_g', 'satfat_g', 'transfat_g', 'monofat_g', 'polyfat_g', 'cholesterol_mg', 'fibre_g', 'sodium_mg'];
+const NUTRIENT_LIMITS = ['energy_kj' => 3800, 'protein_g' => 100, 'carbs_g' => 100, 'sugar_g' => 100, 'fat_g' => 100, 'satfat_g' => 100, 'transfat_g' => 100,
+    'monofat_g' => 100, 'polyfat_g' => 100, 'cholesterol_mg' => 5000, 'fibre_g' => 100, 'sodium_mg' => 40000];
 const UNITS = ['each', 'g', 'kg', 'ml', 'l'];
 const SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
 
@@ -759,7 +762,7 @@ function read_label(string $b64, string $mime): array
     $prompt = <<<TXT
     This photo shows a packaged food label from South Africa: a nutrition information table and/or an ingredients list.
     Reply with only a JSON object, no other text:
-    {"column": "100g" | "100ml" | "serving" | null, "energy_kj": number|null, "protein_g": number|null, "carbs_g": number|null, "sugar_g": number|null, "fat_g": number|null, "satfat_g": number|null, "fibre_g": number|null, "sodium_mg": number|null, "ingredients": string|null}
+    {"column": "100g" | "100ml" | "serving" | null, "energy_kj": number|null, "protein_g": number|null, "carbs_g": number|null, "sugar_g": number|null, "fat_g": number|null, "satfat_g": number|null, "transfat_g": number|null, "monofat_g": number|null, "polyfat_g": number|null, "cholesterol_mg": number|null, "fibre_g": number|null, "sodium_mg": number|null, "ingredients": string|null}
     Rules: use the per 100 g (or per 100 ml) column, never per serving; set "column" to the column you used.
     Carbs means total (glycaemic) carbohydrate; sugar is "of which total sugar". If only kcal is given, energy_kj = kcal * 4.184.
     If salt is given instead of sodium, sodium_mg = salt in g * 400. Sodium in g -> multiply by 1000 for mg.
@@ -795,7 +798,7 @@ function read_label(string $b64, string $mime): array
     if (!preg_match('/\{.*\}/s', $text, $m) || !is_array($j = json_decode($m[0], true))) {
         fail('Could not read the label. Try a sharper, straight-on photo.', 502);
     }
-    $limits = ['energy_kj' => 4000, 'protein_g' => 100, 'carbs_g' => 100, 'sugar_g' => 100, 'fat_g' => 100, 'satfat_g' => 100, 'fibre_g' => 100, 'sodium_mg' => 40000];
+    $limits = NUTRIENT_LIMITS;
     $n = [];
     foreach ($limits as $k => $max) {
         $v = $j[$k] ?? null;
@@ -876,9 +879,8 @@ function off_http(string $path, ?array $post = null, int $timeout = 20): array
 /** Numbers a real label could have; anything else isn't sent. */
 function off_plausible(array $p): bool
 {
-    $limits = ['energy_kj' => 3800, 'protein_g' => 100, 'carbs_g' => 100, 'sugar_g' => 100, 'fat_g' => 100, 'satfat_g' => 100, 'fibre_g' => 100, 'sodium_mg' => 40000];
-    foreach ($limits as $k => $max) {
-        if ($p[$k] !== null && ((float)$p[$k] < 0 || (float)$p[$k] > $max)) {
+    foreach (NUTRIENT_LIMITS as $k => $max) {
+        if (($p[$k] ?? null) !== null && ((float)$p[$k] < 0 || (float)$p[$k] > $max)) {
             return false;
         }
     }
@@ -937,9 +939,10 @@ function off_contribute(int $productId, ?int $userId): string
     if (!$theirs && $ours && $p['unit'] !== 'each' && off_plausible($p)) {
         $f['nutrition_data_per'] = '100g';
         $map = ['energy_kj' => ['energy-kj', 'kJ'], 'protein_g' => ['proteins', 'g'], 'carbs_g' => ['carbohydrates', 'g'], 'sugar_g' => ['sugars', 'g'],
-                'fat_g' => ['fat', 'g'], 'satfat_g' => ['saturated-fat', 'g'], 'fibre_g' => ['fiber', 'g'], 'sodium_mg' => ['sodium', 'mg']];
+                'fat_g' => ['fat', 'g'], 'satfat_g' => ['saturated-fat', 'g'], 'transfat_g' => ['trans-fat', 'g'], 'monofat_g' => ['monounsaturated-fat', 'g'],
+                'polyfat_g' => ['polyunsaturated-fat', 'g'], 'cholesterol_mg' => ['cholesterol', 'mg'], 'fibre_g' => ['fiber', 'g'], 'sodium_mg' => ['sodium', 'mg']];
         foreach ($map as $col => [$name, $unit]) {
-            if ($p[$col] !== null) {
+            if (($p[$col] ?? null) !== null) {
                 $f["nutriment_$name"] = (string)(float)$p[$col];
                 $f["nutriment_{$name}_unit"] = $unit;
             }
@@ -1140,6 +1143,10 @@ function off_parse(array $data): ?array
         'sugar_g' => $val('sugars_100g'),
         'fat_g' => $val('fat_100g'),
         'satfat_g' => $val('saturated-fat_100g'),
+        'transfat_g' => $val('trans-fat_100g'),
+        'monofat_g' => $val('monounsaturated-fat_100g'),
+        'polyfat_g' => $val('polyunsaturated-fat_100g'),
+        'cholesterol_mg' => ($c = $val('cholesterol_100g')) === null ? null : round($c * 1000, 1),   // Open Food Facts keeps it in g
         'fibre_g' => $val('fiber_100g'),
         'sodium_mg' => $sodium === null ? null : round($sodium * 1000, 1),
     ];
