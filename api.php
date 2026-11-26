@@ -809,26 +809,32 @@ function read_label(string $b64, string $mime): array
     return ['nutrition' => $n, 'column' => $col, 'ingredients' => $ing ?: null, 'additives' => additives_in($ing)];
 }
 
+/** A v3 product answer ({"status": "success", "product": {...}}) in the shape the parser reads ({"status": 1, ...}). */
+function off_v3(?string $body): ?array
+{
+    $d = $body ? json_decode($body, true) : null;
+    if (!is_array($d)) {
+        return null;
+    }
+    $found = ($d['status'] ?? '') === 'success' || ($d['status'] ?? '') === 'success_with_warnings' || (int)($d['status'] ?? 0) === 1;
+    return ['status' => $found && !empty($d['product']) ? 1 : 0, 'product' => (array)($d['product'] ?? [])];
+}
+
 function off_lookup(string $barcode): ?array
 {
     if (!function_exists('curl_init')) {
         return null;
     }
     $fields = 'product_name,brands,quantity,product_quantity,product_quantity_unit,nutriments,nutriscore_grade,nova_group,additives_tags,ingredients_text_en,ingredients_text';
-    $ch = curl_init('https://world.openfoodfacts.org/api/v2/product/' . rawurlencode($barcode) . '.json?fields=' . $fields);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 6,
-        CURLOPT_CONNECTTIMEOUT => 4,
-        CURLOPT_USERAGENT => 'KitchenBudget/1.0 (personal grocery app)',
-    ]);
-    $body = curl_exec($ch);
-    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    $data = $body ? json_decode($body, true) : null;
+    try {
+        [$code, $body] = off_http('/api/v3/product/' . rawurlencode($barcode) . '?fields=' . $fields, null, 6);
+    } catch (RuntimeException $e) {
+        [$code, $body] = [0, ''];
+    }
+    $data = off_v3($body);
     // remembered for the pilot numbers: found, missing (they don't have it) or error (couldn't ask)
-    $GLOBALS['off_last'] = is_array($data) && ($code === 200 || $code === 404) ? ((int)($data['status'] ?? 0) === 1 ? 'found' : 'missing') : 'error';
-    if ($code !== 200 || !is_array($data)) {
+    $GLOBALS['off_last'] = $data !== null && ($code === 200 || $code === 404) ? ((int)$data['status'] === 1 ? 'found' : 'missing') : 'error';
+    if ($code !== 200 || $data === null) {
         return null;
     }
     return off_parse($data);
@@ -856,7 +862,7 @@ function off_http(string $path, ?array $post = null, int $timeout = 20): array
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT => $timeout,
         CURLOPT_CONNECTTIMEOUT => 5,
-        CURLOPT_USERAGENT => 'KitchenBudget/1.0 (' . (string)config('off_contact', 'kitchen budget app') . ')',
+        CURLOPT_USERAGENT => 'KitchenBudget/1.0 (' . (string)config('off_contact', 'trueideonline.co.za') . ')',   // their rule: AppName/Version (ContactEmail)
     ];
     if ((string)config('off_basic_auth', '') !== '') {
         $opts[CURLOPT_USERPWD] = (string)config('off_basic_auth');   // the staging server wants off:off
@@ -903,8 +909,8 @@ function off_contribute(int $productId, ?int $userId): string
     if (!$p || !shareable_barcode($p['barcode']) || mb_strlen(trim((string)$p['name'])) < 3) {
         return 'skipped';
     }
-    [$code, $body] = off_http('/api/v2/product/' . $p['barcode'] . '.json?fields=product_name,brands,quantity,nutriments,ingredients_text,ingredients_text_en,image_front_url,image_nutrition_url,image_ingredients_url');
-    $d = json_decode($body, true);
+    [$code, $body] = off_http('/api/v3/product/' . $p['barcode'] . '?fields=product_name,brands,quantity,nutriments,ingredients_text,ingredients_text_en,image_front_url,image_nutrition_url,image_ingredients_url');
+    $d = off_v3($body);
     if (!is_array($d) || ($code !== 200 && $code !== 404)) {
         throw new RuntimeException("Open Food Facts lookup failed ($code)");
     }

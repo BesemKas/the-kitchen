@@ -1,7 +1,7 @@
 name: South African products from Open Food Facts
 
-# Builds data/off-za.jsonl.gz from Open Food Facts' data export (their API isn't for bulk downloads).
-# Runs on the 1st of every month and whenever started by hand (Actions -> this workflow -> Run workflow).
+# Builds data/off-za.jsonl.gz from Open Food Facts' data export: they ask that anything over a few hundred products
+# comes from the export, not the API. Runs on the 1st of every month, or by hand: Actions -> this workflow -> Run workflow.
 on:
   workflow_dispatch:
   schedule:
@@ -13,15 +13,33 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: off-za
+  cancel-in-progress: false
+
 jobs:
   export:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install 'duckdb>=1.1'
-      - name: Look at the export
-        run: python tools/off_za_export.py --describe
+      - name: Download the Open Food Facts export (one request)
+        run: |
+          curl -fL --retry 5 --retry-delay 30 -A 'KitchenBudget/1.0 (github.com/BesemKas/the-kitchen)' \
+            -o "$RUNNER_TEMP/food.parquet" 'https://huggingface.co/datasets/openfoodfacts/product-database/resolve/main/food.parquet?download=true'
+          ls -lh "$RUNNER_TEMP/food.parquet"
+      - name: Keep the South African products
+        run: python tools/off_za_export.py "$RUNNER_TEMP/food.parquet" data/off-za.jsonl.gz
+      - name: Save it in the repo when it changed
+        run: |
+          ls -lh data/off-za.jsonl.gz
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/off-za.jsonl.gz
+          git diff --cached --quiet && { echo "No change"; exit 0; }
+          git commit -m "South African products from Open Food Facts ($(date -u +%Y-%m-%d))"
+          git push
