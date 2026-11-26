@@ -121,15 +121,15 @@ function latest_prices(?array $productIds = null): array
     foreach (q($sql, $params) as $r) {
         $map[(int)$r['product_id']][(int)$r['store_id']] = ['price' => (float)$r['price'], 'at' => $r['recorded_at']];
     }
-    // where you haven't priced something yourself, show what others at the same branch paid lately
-    foreach (branch_prices($productIds) as $r) {
+    // where you haven't priced something yourself, show what others at the same chain paid lately
+    foreach (chain_prices($productIds) as $r) {
         $map[(int)$r['product_id']][(int)$r['store_id']] ??= ['price' => (float)$r['price'], 'at' => $r['recorded_at'], 'shared' => true];
     }
     return $map;
 }
 
-/** Newest price per product at each of your branch-linked shops, from other kitchens at that branch that share. */
-function branch_prices(?array $productIds = null): array
+/** Newest price per product at each of your shops, from other kitchens' shops of the same chain that share. */
+function chain_prices(?array $productIds = null): array
 {
     if (user_setting('share_prices', '1') === '0') {
         return [];   // give to get: not sharing means not seeing either
@@ -144,10 +144,10 @@ function branch_prices(?array $productIds = null): array
         $params = array_merge($params, array_values($productIds));
     }
     $rows = q("SELECT ms.id store_id, p.product_id, p.price, p.recorded_at FROM stores ms
-        JOIN stores os ON os.branch_id = ms.branch_id AND os.user_id <> ms.user_id
+        JOIN stores os ON os.chain = ms.chain AND os.user_id <> ms.user_id
         JOIN prices p ON p.store_id = os.id AND p.recorded_at > NOW() - INTERVAL 60 DAY
         LEFT JOIN user_settings us ON us.user_id = os.user_id AND us.k = 'share_prices'
-        WHERE ms.user_id = ? AND ms.branch_id IS NOT NULL AND (us.v IS NULL OR us.v <> '0')$filter
+        WHERE ms.user_id = ? AND ms.chain IS NOT NULL AND (us.v IS NULL OR us.v <> '0')$filter
         ORDER BY p.recorded_at DESC, p.id DESC", $params)->fetchAll();
     $seen = $out = [];
     foreach ($rows as $r) {
@@ -160,12 +160,21 @@ function branch_prices(?array $productIds = null): array
     return $out;
 }
 
-const CHAINS = ['Checkers', 'Checkers Hyper', 'Shoprite', 'Usave', 'Pick n Pay', 'Pick n Pay Hyper', 'Boxer', 'Woolworths', 'Spar', 'Superspar', 'Kwikspar',
-    'Food Lover\'s Market', 'OK Foods', 'Makro', 'Game', 'Clicks', 'Dis-Chem', 'Other'];
+const CHAINS = ['Checkers', 'Shoprite', 'Usave', 'Pick n Pay', 'Boxer', 'Woolworths', 'Spar', 'Food Lover\'s Market', 'OK Foods', 'Makro', 'Game', 'Clicks', 'Dis-Chem'];
 
-function branch_key(string $name): string
+/** The chain a shop's name points at ("Checkers Durbanville" → Checkers), or null. */
+function chain_guess(string $name): ?string
 {
-    return trim(preg_replace('/[^a-z0-9]+/', ' ', mb_strtolower($name)));
+    $n = mb_strtolower($name);
+    $map = ['checkers' => 'Checkers', 'shoprite' => 'Shoprite', 'usave' => 'Usave', 'pick n pay' => 'Pick n Pay', "pick 'n pay" => 'Pick n Pay', 'picknpay' => 'Pick n Pay',
+            'pnp' => 'Pick n Pay', 'boxer' => 'Boxer', 'woolworths' => 'Woolworths', 'woolies' => 'Woolworths', 'spar' => 'Spar', 'food lover' => 'Food Lover\'s Market',
+            'ok foods' => 'OK Foods', 'makro' => 'Makro', 'game' => 'Game', 'clicks' => 'Clicks', 'dis-chem' => 'Dis-Chem', 'dischem' => 'Dis-Chem'];
+    foreach ($map as $k => $chain) {
+        if (str_contains($n, $k)) {
+            return $chain;
+        }
+    }
+    return null;
 }
 
 function best_price(array $byStore): ?float
@@ -266,8 +275,8 @@ function seed_kitchen(int $from, int $to): void
     if (q('SELECT 1 FROM stores WHERE user_id = ? LIMIT 1', [$to])->fetchColumn()) {
         return;
     }
-    foreach (q('SELECT id, name, branch_id FROM stores WHERE user_id = ?', [$from])->fetchAll() as $st) {
-        q('INSERT INTO stores (user_id, name, branch_id) VALUES (?, ?, ?)', [$to, $st['name'], $st['branch_id']]);
+    foreach (q('SELECT id, name, chain FROM stores WHERE user_id = ?', [$from])->fetchAll() as $st) {
+        q('INSERT INTO stores (user_id, name, chain) VALUES (?, ?, ?)', [$to, $st['name'], $st['chain']]);
         $new = (int)db()->lastInsertId();
         // the latest price of each product at this shop, so the shared kitchen already knows what things cost
         q('INSERT INTO prices (product_id, store_id, price, user_id, recorded_at)
@@ -1221,7 +1230,7 @@ try {
             if (!q('SELECT 1 FROM stores WHERE user_id = ? LIMIT 1', [$kid])->fetchColumn()) {
                 // a fresh account starts with the usual shops (no prices yet)
                 foreach (DEFAULT_STORES as $n) {
-                    q('INSERT IGNORE INTO stores (user_id, name) VALUES (?, ?)', [$kid, $n]);
+                    q('INSERT IGNORE INTO stores (user_id, name, chain) VALUES (?, ?, ?)', [$kid, $n, chain_guess($n)]);
                 }
             }
             out([
@@ -1232,7 +1241,7 @@ try {
                     'protein_target_g' => $u['protein_target_g'] === null ? null : (int)$u['protein_target_g'],
                     'kj_target' => $u['kj_target'] === null ? null : (int)$u['kj_target'],
                 ], q('SELECT id, display_name, protein_target_g, kj_target FROM users WHERE id = ?', [$uid])->fetchAll()),
-                'stores' => q('SELECT s.id, s.name, s.branch_id, b.chain, b.name branch FROM stores s LEFT JOIN branches b ON b.id = s.branch_id WHERE s.user_id = ? ORDER BY s.name', [$kid])->fetchAll(),
+                'stores' => q('SELECT id, name, chain FROM stores WHERE user_id = ? ORDER BY name', [$kid])->fetchAll(),
                 'share_prices' => user_setting('share_prices', '1'),
                 'chains' => CHAINS,
                 'budget' => (float)user_setting('monthly_budget', '0'),
@@ -1261,39 +1270,23 @@ try {
             if (q('SELECT 1 FROM stores WHERE user_id = ? AND name = ?', [$kid, str_in($in, 'name', 60, true)])->fetchColumn()) {
                 fail('You already have that shop');
             }
-            q('INSERT INTO stores (user_id, name) VALUES (?, ?)', [$kid, str_in($in, 'name', 60, true)]);
+            $sname = str_in($in, 'name', 60, true);
+            q('INSERT INTO stores (user_id, name, chain) VALUES (?, ?, ?)', [$kid, $sname, chain_guess($sname)]);
             out(['id' => (int)db()->lastInsertId()]);
 
         case 'stores.rename':
-            q('UPDATE stores SET name = ? WHERE id = ? AND user_id = ?', [str_in($in, 'name', 60, true), int_in($in, 'id'), $kid]);
+            $sname = str_in($in, 'name', 60, true);
+            q('UPDATE stores SET name = ?, chain = COALESCE(chain, ?) WHERE id = ? AND user_id = ?', [$sname, chain_guess($sname), int_in($in, 'id'), $kid]);
             out(['ok' => true]);
 
-        case 'stores.branch':
-            // link one of your shops to a branch (chain + branch name), or unlink with an empty branch
+        case 'stores.chain':
+            // which chain a shop is; prices are shared within a chain. Empty = not a chain (no sharing).
             $sid = int_in($in, 'id');
             q('SELECT 1 FROM stores WHERE id = ? AND user_id = ?', [$sid, $kid])->fetchColumn() || fail('Shop not found', 404);
-            $name = trim((string)($in['branch'] ?? ''));
-            if ($name === '') {
-                q('UPDATE stores SET branch_id = NULL WHERE id = ?', [$sid]);
-                out(['ok' => true, 'branch_id' => null]);
-            }
-            $chain = (string)($in['chain'] ?? '');
-            in_array($chain, CHAINS, true) || fail('Pick the chain');
-            $name = mb_substr(preg_replace('/\s+/', ' ', $name), 0, 80);
-            $key = branch_key($name);
-            $key !== '' || fail('Name the branch, like the mall or suburb');
-            q('INSERT IGNORE INTO branches (chain, name, name_key) VALUES (?, ?, ?)', [$chain, $name, $key]);
-            $bid = (int)q('SELECT id FROM branches WHERE chain = ? AND name_key = ?', [$chain, $key])->fetchColumn();
-            q('UPDATE stores SET branch_id = ? WHERE id = ?', [$bid, $sid]);
-            out(['ok' => true, 'branch_id' => $bid]);
-
-        case 'branches.search':
-            // branch names others already use for this chain, so everyone lands on the same branch
-            $chain = (string)($in['chain'] ?? '');
-            in_array($chain, CHAINS, true) || fail('Pick the chain');
-            $like = '%' . branch_key((string)($in['q'] ?? '')) . '%';
-            out(['branches' => q('SELECT b.id, b.name, COUNT(DISTINCT s.user_id) kitchens FROM branches b LEFT JOIN stores s ON s.branch_id = b.id
-                WHERE b.chain = ? AND b.name_key LIKE ? GROUP BY b.id ORDER BY kitchens DESC, b.name LIMIT 10', [$chain, $like])->fetchAll()]);
+            $chain = trim((string)($in['chain'] ?? ''));
+            ($chain === '' || in_array($chain, CHAINS, true)) || fail('Pick a chain from the list');
+            q('UPDATE stores SET chain = ? WHERE id = ?', [$chain === '' ? null : $chain, $sid]);
+            out(['ok' => true, 'chain' => $chain === '' ? null : $chain]);
 
         case 'prices.share':
             set_user_setting('share_prices', !empty($in['share']) ? '1' : '0');
