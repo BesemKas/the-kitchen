@@ -147,7 +147,7 @@ function chain_prices(?array $productIds = null): array
         JOIN stores os ON os.chain = ms.chain AND os.user_id <> ms.user_id
         JOIN prices p ON p.store_id = os.id AND p.recorded_at > NOW() - INTERVAL 60 DAY
         LEFT JOIN user_settings us ON us.user_id = os.user_id AND us.k = 'share_prices'
-        WHERE ms.user_id = ? AND ms.chain IS NOT NULL AND (us.v IS NULL OR us.v <> '0')$filter
+        WHERE ms.user_id = ? AND ms.chain IS NOT NULL AND ms.chain NOT IN (" . implode(',', array_map(fn($c) => db()->quote($c), PER_SHOP_CHAINS)) . ") AND (us.v IS NULL OR us.v <> '0')$filter
         ORDER BY p.recorded_at DESC, p.id DESC", $params)->fetchAll();
     $seen = $out = [];
     foreach ($rows as $r) {
@@ -159,6 +159,9 @@ function chain_prices(?array $productIds = null): array
     }
     return $out;
 }
+
+/** Franchises where each owner sets prices: labelled, but prices stay with each shop. */
+const PER_SHOP_CHAINS = ['Spar', 'OK Foods', 'Food Lover\'s Market'];
 
 const CHAINS = ['Checkers', 'Shoprite', 'Usave', 'Pick n Pay', 'Boxer', 'Woolworths', 'Spar', 'Food Lover\'s Market', 'OK Foods', 'Makro', 'Game', 'Clicks', 'Dis-Chem'];
 
@@ -1244,6 +1247,7 @@ try {
                 'stores' => q('SELECT id, name, chain FROM stores WHERE user_id = ? ORDER BY name', [$kid])->fetchAll(),
                 'share_prices' => user_setting('share_prices', '1'),
                 'chains' => CHAINS,
+                'per_shop_chains' => PER_SHOP_CHAINS,
                 'budget' => (float)user_setting('monthly_budget', '0'),
                 'spent' => period_spent(pay_period()),
                 'period' => pay_period(),

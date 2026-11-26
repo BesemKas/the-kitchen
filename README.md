@@ -242,7 +242,7 @@ Everyone shares one product catalogue (names, barcodes, pack sizes, nutrition). 
 
 ## Prices within a chain
 
-Prices are the same at every branch of a chain and differ between chains (Boxer vs Checkers), so prices are shared within a chain and never across chains.
+Prices are the same at every branch of a chain and differ between chains (Boxer vs Checkers), so prices are shared within a chain and never across chains. Each chain counts on its own, even within a group (Checkers and Shoprite don't share). Spar, OK Foods and Food Lover's Market are franchises where each owner sets prices, so their prices stay with each shop.
 
 - Each shop has a chain. Shops named after one (Checkers, Pick n Pay, Boxer, Spar…) get it automatically; change it under *Me → Shopping → Chain*, or set *Not a chain* for a market or butcher.
 - Where you haven't priced something yourself, you see the newest price someone else paid at the same chain in the last 60 days, marked ≈. Your own prices always win, and a shared price is never saved as yours.

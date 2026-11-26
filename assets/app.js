@@ -2889,8 +2889,8 @@ function chainSheet(shop, done) {
   if (!shop) return;
   const chains = S.chains || [];
   openSheet(`${sheetHead(`Which chain is ${esc(shop.name)}?`)}
-    <p class="small muted">Prices are the same at every branch of a chain, so the app shows what others paid at the same chain where you haven't priced something yet.</p>
-    <div class="stack tight">${chains.map((c) => `<button type="button" class="btn block ${c === shop.chain ? 'primary' : ''}" data-chain="${esc(c)}">${esc(c)}</button>`).join('')}
+    <p class="small muted">Prices are the same at every branch of a chain, so the app shows what others paid at the same chain where you haven't priced something yet. Each chain is separate, even within a group (Checkers and Shoprite don't share).</p>
+    <div class="stack tight">${chains.map((c) => `<button type="button" class="btn block ${c === shop.chain ? 'primary' : ''}" data-chain="${esc(c)}">${esc(c)}${(S.perShopChains || []).includes(c) ? ' <span class="small muted">· prices per shop</span>' : ''}</button>`).join('')}
       <button type="button" class="btn block ${shop.chain ? '' : 'primary'}" data-chain="">Not a chain (a market, butcher, spaza…)</button></div>`);
   sheetBody.onclick = async (e) => {
     const b = e.target.closest('[data-chain]'); if (!b) return;
@@ -3402,9 +3402,9 @@ async function renderBudget(mode = 'money') {
     <section class="card stack">
       <h2>Shopping</h2>
       <div class="small muted">Your shops</div>
-      <ul class="list">${S.stores.map((s) => `<li class="shop-row"><span class="grow">${esc(s.name)}<span class="small muted block">${s.chain ? esc(s.chain) : 'Chain not set'}</span></span><button class="btn small" data-chain-of="${s.id}">Chain</button><button class="btn small" data-rename="${s.id}">Rename</button><button class="icon-btn" data-del-store="${s.id}" aria-label="Delete">✕</button></li>`).join('')}</ul>
+      <ul class="list">${S.stores.map((s) => `<li class="shop-row"><span class="grow">${esc(s.name)}<span class="small muted block">${s.chain ? `${esc(s.chain)}${(S.perShopChains || []).includes(s.chain) ? ' · prices per shop' : ''}` : 'Not a chain · prices per shop'}</span></span><button class="btn small" data-chain-of="${s.id}">Chain</button><button class="btn small" data-rename="${s.id}">Rename</button><button class="icon-btn" data-del-store="${s.id}" aria-label="Delete">✕</button></li>`).join('')}</ul>
       <form class="row" id="storeForm"><input name="name" class="grow" placeholder="Add a shop"><button class="btn">Add</button></form>
-      <div class="toggle-row static"><span class="grow"><b>Share prices within each chain</b><span class="small muted block">Prices are the same at every branch of a chain. Where you haven't priced something yourself, you see what others paid at the same chain in the last 60 days, and they see yours. No names. Never shared between chains. Off means you don't see theirs either.</span></span>
+      <div class="toggle-row static"><span class="grow"><b>Share prices within each chain</b><span class="small muted block">Prices are the same at every branch of a chain. Where you haven't priced something yourself, you see what others paid at the same chain in the last 60 days, and they see yours. No names. Never shared between chains (Checkers and Shoprite are separate), and never for Spar, OK Foods or Food Lover's Market, where each shop sets its own prices. Off means you don't see theirs either.</span></span>
         <button type="button" class="switch ${S.sharePrices !== '0' ? 'on' : ''}" data-act="share-prices" aria-pressed="${S.sharePrices !== '0'}" aria-label="Share prices within each chain"><i></i></button></div>
       <div class="stack tight"><span class="small muted">Aisle order (how the shopping list is grouped)</span>
         <ul class="list card flush" id="aisleEd">${(S.aisles || []).map((a, i) => `<li><span class="grow">${esc(a)}</span><button type="button" class="icon-btn" data-aisle-up="${i}" aria-label="Move ${esc(a)} up" ${i ? '' : 'disabled'}>↑</button><button type="button" class="icon-btn" data-aisle-del="${i}" aria-label="Remove ${esc(a)}">✕</button></li>`).join('')}</ul>
@@ -3896,7 +3896,7 @@ async function joinSheet(token, isNew) {
 (async function init() {
   try {
     const b = await api('bootstrap');
-    Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader, sharePrices: b.share_prices, chains: b.chains || [],
+    Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader, sharePrices: b.share_prices, chains: b.chains || [], perShopChains: b.per_shop_chains || [],
       alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday, isAdmin: !!b.is_admin, signupsOpen: !!b.signups_open, household: b.household || null, offReady: !!b.off_ready, offShare: b.off_share || '', checkin: b.checkin || null });
     const saved = store.get('store', null);
     S.storeId = S.stores.some((s) => String(s.id) === String(saved)) ? String(saved) : (S.stores[0] ? String(S.stores[0].id) : null);
