@@ -6,9 +6,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '17 3 1 * *'
-  push:
-    branches: [feat/off-export]
-    paths: ['tools/off_za_export.py', '.github/workflows/off-za.yml']
 
 permissions:
   contents: write

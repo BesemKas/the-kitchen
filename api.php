@@ -1339,10 +1339,16 @@ try {
             // name search for big catalogues: things you've bought first, then names that start with the words, then the rest
             $term = trim(mb_strtolower(str_in($in, 'q', 60) ?? ''));
             mb_strlen($term) >= 2 || out(['products' => []]);
-            $like = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $term) . '%';
+            // every word has to match ("jungle oats"); words that start a word in the name or brand rank first
+            $esc = fn($w) => str_replace(['%', '_'], ['\\%', '\\_'], $w);
+            $words = array_slice(array_values(array_filter(preg_split('/\s+/', $term))), 0, 4);
+            $text = "LOWER(CONCAT_WS(' ', p.name, p.brand))";
+            $where = implode(' AND ', array_fill(0, count($words), "$text LIKE ?"));
+            $params = [$kid, ...array_map(fn($w) => '%' . $esc($w) . '%', $words), $esc($term) . '%', '% ' . $esc($words[0]) . '%'];
             $rows = q("SELECT p.*, pa.amount pantry, pa.bought_count, pa.last_bought, pa.updated_at pantry_at, pa.skip_again FROM products p LEFT JOIN pantry pa ON pa.product_id = p.id AND pa.user_id = ?
-                       WHERE LOWER(CONCAT_WS(' ', p.name, p.brand)) LIKE ?
-                       ORDER BY COALESCE(pa.bought_count, 0) > 0 DESC, LOWER(p.name) LIKE ? DESC, p.name LIMIT 25", [$kid, $like, $term . '%'])->fetchAll();
+                       WHERE $where
+                       ORDER BY COALESCE(pa.bought_count, 0) > 0 DESC, LOWER(p.name) LIKE ? DESC, CONCAT(' ', $text) LIKE ? DESC, p.energy_kj IS NOT NULL DESC, p.name
+                       LIMIT 25", $params)->fetchAll();
             $prices = latest_prices(array_map(fn($r) => (int)$r['id'], $rows));
             out(['products' => array_map(fn($r) => product_row($r, $prices), $rows)]);
 
