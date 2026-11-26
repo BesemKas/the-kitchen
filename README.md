@@ -240,14 +240,13 @@ Everyone shares one product catalogue (names, barcodes, pack sizes, nutrition). 
 - **Search reaches everything.** Searching in Kitchen, the shopping list's add box and the recipe editor also asks the server, so the whole catalogue is two letters away.
 - Open Food Facts data is ODbL: the credit and licence link sit at the bottom of the Me page; keep them there.
 
-## Prices within a chain
+## Prices shared by shop name
 
-Prices are the same at every branch of a chain and differ between chains (Boxer vs Checkers), so prices are shared within a chain and never across chains. Each chain counts on its own, even within a group (Checkers and Shoprite don't share). Spar, OK Foods and Food Lover's Market are franchises where each owner sets prices, so their prices stay with each shop.
+Shops only have a name. Prices are shared between shops that are the same company, worked out from the name: your *Checkers* shows what others paid at any *Checkers* in the last 60 days, marked ≈.
 
-- Each shop has a chain. Shops named after one (Checkers, Pick n Pay, Boxer, Spar…) get it automatically; change it under *Me → Shopping → Chain*, or set *Not a chain* for a market or butcher.
-- Where you haven't priced something yourself, you see the newest price someone else paid at the same chain in the last 60 days, marked ≈. Your own prices always win, and a shared price is never saved as yours.
-- No names travel with a shared price.
-- **Share prices within each chain** (on by default) turns it off. Off means you don't share and don't see others' prices either.
+- Each company counts on its own, even within a group: Checkers and Shoprite don't share.
+- Spar, OK Foods and Food Lover's Market are franchises where each owner sets prices, so they never share. Neither does a shop whose name isn't a known chain (a market, a butcher).
+- Your own price always wins and a shared price is never saved as yours. No names travel with a shared price.
 
 ## Kitchen: what's at home
 

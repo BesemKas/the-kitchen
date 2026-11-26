@@ -131,9 +131,6 @@ function latest_prices(?array $productIds = null): array
 /** Newest price per product at each of your shops, from other kitchens' shops of the same chain that share. */
 function chain_prices(?array $productIds = null): array
 {
-    if (user_setting('share_prices', '1') === '0') {
-        return [];   // give to get: not sharing means not seeing either
-    }
     $filter = '';
     $params = [kid()];
     if ($productIds !== null) {
@@ -163,9 +160,8 @@ function chain_prices(?array $productIds = null): array
 /** Franchises where each owner sets prices: labelled, but prices stay with each shop. */
 const PER_SHOP_CHAINS = ['Spar', 'OK Foods', 'Food Lover\'s Market'];
 
-const CHAINS = ['Checkers', 'Shoprite', 'Usave', 'Pick n Pay', 'Boxer', 'Woolworths', 'Spar', 'Food Lover\'s Market', 'OK Foods', 'Makro', 'Game', 'Clicks', 'Dis-Chem'];
-
-/** The chain a shop's name points at ("Checkers Durbanville" → Checkers), or null. */
+/** The chain a shop's name points at ("Checkers Durbanville" → Checkers), or null. Prices are shared between
+ *  shops of the same chain, worked out from the name alone; nobody picks a chain. */
 function chain_guess(string $name): ?string
 {
     $n = mb_strtolower($name);
@@ -1244,10 +1240,7 @@ try {
                     'protein_target_g' => $u['protein_target_g'] === null ? null : (int)$u['protein_target_g'],
                     'kj_target' => $u['kj_target'] === null ? null : (int)$u['kj_target'],
                 ], q('SELECT id, display_name, protein_target_g, kj_target FROM users WHERE id = ?', [$uid])->fetchAll()),
-                'stores' => q('SELECT id, name, chain FROM stores WHERE user_id = ? ORDER BY name', [$kid])->fetchAll(),
-                'share_prices' => user_setting('share_prices', '1'),
-                'chains' => CHAINS,
-                'per_shop_chains' => PER_SHOP_CHAINS,
+                'stores' => q('SELECT id, name FROM stores WHERE user_id = ? ORDER BY name', [$kid])->fetchAll(),
                 'budget' => (float)user_setting('monthly_budget', '0'),
                 'spent' => period_spent(pay_period()),
                 'period' => pay_period(),
@@ -1280,21 +1273,8 @@ try {
 
         case 'stores.rename':
             $sname = str_in($in, 'name', 60, true);
-            q('UPDATE stores SET name = ?, chain = COALESCE(chain, ?) WHERE id = ? AND user_id = ?', [$sname, chain_guess($sname), int_in($in, 'id'), $kid]);
+            q('UPDATE stores SET name = ?, chain = ? WHERE id = ? AND user_id = ?', [$sname, chain_guess($sname), int_in($in, 'id'), $kid]);
             out(['ok' => true]);
-
-        case 'stores.chain':
-            // which chain a shop is; prices are shared within a chain. Empty = not a chain (no sharing).
-            $sid = int_in($in, 'id');
-            q('SELECT 1 FROM stores WHERE id = ? AND user_id = ?', [$sid, $kid])->fetchColumn() || fail('Shop not found', 404);
-            $chain = trim((string)($in['chain'] ?? ''));
-            ($chain === '' || in_array($chain, CHAINS, true)) || fail('Pick a chain from the list');
-            q('UPDATE stores SET chain = ? WHERE id = ?', [$chain === '' ? null : $chain, $sid]);
-            out(['ok' => true, 'chain' => $chain === '' ? null : $chain]);
-
-        case 'prices.share':
-            set_user_setting('share_prices', !empty($in['share']) ? '1' : '0');
-            out(['share_prices' => !empty($in['share']) ? '1' : '0']);
 
         case 'stores.delete':
             q('DELETE FROM stores WHERE id = ? AND user_id = ?', [int_in($in, 'id'), $kid]);
