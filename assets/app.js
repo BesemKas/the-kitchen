@@ -35,7 +35,7 @@ document.addEventListener('input', (e) => {
   try { el.setSelectionRange(pos - (before - el.value.length), pos - (before - el.value.length)); } catch { /* not focusable */ }
 }, true);
 
-const S = { user: null, users: [], stores: [], budget: 0, spent: 0, month: '', products: [], storeId: null, aisles: [], pendingDel: new Set(), pendingClear: null };
+const S = { user: null, users: [], stores: [], budget: 0, spent: 0, month: '', products: [], storeId: null, aisles: [] };
 const UNITS = ['each', 'g', 'kg', 'ml', 'l'];
 const SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
 const NUTRIENTS = [
@@ -119,7 +119,7 @@ const store = {
  * and are sent in order when the connection comes back. Each queued change has an op_id so the
  * server ignores it if it already arrived. */
 const READS = new Set(['bootstrap', 'list.get', 'products.list', 'plan.get', 'recipes.list', 'fridge.list', 'budget.get', 'takeaway.get', 'diary.get']);
-const QUEUEABLE = new Set(['list.add', 'list.update', 'list.delete', 'list.clear', 'list.checkout', 'products.price']);
+const QUEUEABLE = new Set(['list.add', 'list.update', 'list.delete', 'list.clear', 'list.restore', 'list.checkout', 'products.price']);
 const lsGet = (k, d = null) => { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* full or blocked */ } };
 const cacheKey = (action, data) => `kb:${action}:${JSON.stringify(data)}`;
@@ -286,6 +286,7 @@ function applyLocal(op) {
       }
       case 'list.delete': list.items = items.filter((i) => i.id !== Number(d.id)); break;
       case 'list.clear': list.items = d.all ? [] : items.filter((i) => !i.checked); break;
+      case 'list.restore': for (const r of d.items || []) if (!byId(r.id)) list.items.push({ ...r }); break;
       case 'list.checkout': {
         const total = Number(d.total) || 0;
         const estimate = items.filter((i) => i.checked).reduce((t, i) => t + (itemPrice(i).price || 0) * i.qty, 0);
@@ -358,16 +359,22 @@ function toast(msg) {
 }
 function fail(e) { toast(e.message || String(e)); }
 /** Toast with an Undo button; `commit` runs after `ms` unless undone. */
-function undoable(msg, commit, undo, ms = 5000) {
+/** Show a message with Undo. The change has already happened; undo() reverses it. */
+function undoToast(msg, undo, ms = 6000) {
   const t = document.getElementById('toast');
   t.innerHTML = `<span>${esc(msg)}</span> <button type="button" class="toast-btn">Undo</button>`;
   t.hidden = false;
   clearTimeout(toastTimer);
-  let done = false;
-  const timer = setTimeout(async () => { done = true; t.hidden = true; try { await commit(); } catch (er) { fail(er); } }, ms);
-  toastTimer = timer;
-  t.querySelector('.toast-btn').onclick = () => { if (done) return; clearTimeout(timer); t.hidden = true; undo(); };
+  toastTimer = setTimeout(() => { t.hidden = true; }, ms);
+  let used = false;
+  t.querySelector('.toast-btn').onclick = async () => {
+    if (used) return;
+    used = true; clearTimeout(toastTimer); t.hidden = true;
+    try { await undo(); } catch (er) { fail(er); }
+  };
 }
+/** The fields of a list row needed to put it back exactly. */
+const listSnapshot = (it) => ({ id: it.id, product_id: it.product_id, name: it.name, qty: it.qty, unit_price: it.unit_price, checked: it.checked, from_plan: it.from_plan, added_by: it.added_by, created_at: it.created_at });
 
 /** Price per kg / litre / item, for comparing pack sizes. */
 function unitPrice(p, price) {
@@ -604,7 +611,6 @@ async function renderList() {
   S.lastListJson = JSON.stringify(items);
   S.listItems = items;
   const lines = items
-    .filter((it) => !S.pendingDel.has(it.id) && !(S.pendingClear === 'all' || (S.pendingClear === 'checked' && it.checked)))
     .map((it) => ({ it, p: itemPrice(it) }));
   const open = lines.filter(({ it }) => !it.checked);
   const done = lines.filter(({ it }) => it.checked);
@@ -666,9 +672,15 @@ async function renderList() {
 
     ${(() => {
       const onList = new Set(items.filter((i) => !i.checked && i.product_id).map((i) => i.product_id));
-      const low = S.products.filter((p) => ['low', 'out'].includes(pantryState(p)) && !onList.has(p.id))
-        .sort((a, b) => (pantryState(a) === 'out' ? 0 : 1) - (pantryState(b) === 'out' ? 0 : 1) || (b.bought_count || 0) - (a.bought_count || 0)).slice(0, 8);
-      return low.length ? `<section class="card stack"><h2>Buy again</h2><p class="small muted">Low or out at home.</p>${low.map((p) => `<div class="row"><span class="grow">${esc(p.name)} <span class="small ${pantryState(p) === 'out' ? 'bad-text' : 'warn-text'}">${PANTRY_LABEL[pantryState(p)].toLowerCase()}</span></span><button type="button" class="btn small" data-addlow="${p.id}">＋ Add</button></div>`).join('')}</section>` : '';
+      const low = buyAgain(onList);
+      if (!low.length) return '';
+      const showAll = S.buyAgainAll;
+      const shown = showAll ? low : low.slice(0, 5);
+      return `<section class="card stack tight buy-again"><div class="row between"><h2>Buy again</h2><span class="small muted">low or out at home</span></div>
+        ${shown.map((p) => `<div class="row"><span class="grow">${esc(p.name)} <span class="small ${pantryState(p) === 'out' ? 'bad-text' : 'warn-text'}">${PANTRY_LABEL[pantryState(p)].toLowerCase()}</span></span>
+          <button type="button" class="icon-btn" data-skip="${p.id}" aria-label="Not needed: hide ${esc(p.name)} until you buy it again">✕</button>
+          <button type="button" class="btn small" data-addlow="${p.id}">＋ Add</button></div>`).join('')}
+        ${low.length > 5 ? `<button type="button" class="linklike small" data-act="buy-again-all">${showAll ? 'Show fewer' : `Show all ${low.length}`}</button>` : ''}</section>`;
     })()}
     ${where ? whereToShopHtml(where) : ''}
 
@@ -742,6 +754,10 @@ async function renderList() {
     if (e.key === 'Escape') { sug.hidden = true; }
   };
   input.onblur = () => setTimeout(() => { sug.hidden = true; }, 200);
+  // keep the focus (and the phone keyboard) in place while a suggestion is pressed: if the keyboard drops
+  // mid-tap the list jumps, the finger lifts somewhere else and the tap never becomes a click
+  sug.onpointerdown = (e) => e.preventDefault();
+  sug.onmousedown = (e) => e.preventDefault();
   sug.onclick = async (e) => {
     const b = e.target.closest('button');
     if (!b) return;
@@ -755,6 +771,15 @@ async function renderList() {
   };
 
   view.onclick = async (e) => {
+    const skip = e.target.closest('[data-skip]');
+    if (skip) {
+      const p = S.products.find((x) => x.id === Number(skip.dataset.skip));
+      try { await api('pantry.set', { product_id: p.id, skip: true }); p.skip_again = true; } catch (er) { return fail(er); }
+      renderList();
+      undoToast(`${p.name} hidden until you buy it again`, async () => { await api('pantry.set', { product_id: p.id, skip: false }); p.skip_again = false; renderList(); });
+      return;
+    }
+    if (e.target.closest('[data-act="buy-again-all"]')) { S.buyAgainAll = !S.buyAgainAll; return renderList(); }
     const addLow = e.target.closest('[data-addlow]');
     if (addLow) { try { await api('list.add', { product_id: addLow.dataset.addlow, qty: 1 }); } catch (er) { fail(er); } return renderList(); }
     const eat = e.target.closest('[data-eat]');
@@ -772,10 +797,10 @@ async function renderList() {
         case 'inc': await api('list.update', { id: it.id, qty: it.qty + 1 }); break;
         case 'dec':
           if (it.qty <= 1) {
-            S.pendingDel.add(it.id);
+            const snap = [listSnapshot(it)];
+            await api('list.delete', { id: it.id });
             renderList();
-            undoable(`Removed ${it.name}`, async () => { await api('list.delete', { id: it.id }); S.pendingDel.delete(it.id); },
-              () => { S.pendingDel.delete(it.id); renderList(); });
+            undoToast(`Removed ${it.name}`, async () => { await api('list.restore', { items: snap }); renderList(); });
             return;
           }
           await api('list.update', { id: it.id, qty: it.qty - 1 });
@@ -792,11 +817,12 @@ async function renderList() {
         case 'clear-checked':
         case 'clear-all': {
           const all = el.dataset.act === 'clear-all';
-          S.pendingClear = all ? 'all' : 'checked';
+          // exactly what's on screen now; anything added later is never touched by this undo
+          const snap = items.filter((i) => all || i.checked).map(listSnapshot);
+          if (!snap.length) return;
+          await api('list.clear', all ? { all: true } : {});
           renderList();
-          undoable(all ? 'List cleared' : 'Ticked items removed',
-            async () => { await api('list.clear', all ? { all: true } : {}); S.pendingClear = null; renderList(); },
-            () => { S.pendingClear = null; renderList(); });
+          undoToast(all ? `List cleared (${snap.length})` : `Removed ${snap.length} ticked`, async () => { await api('list.restore', { items: snap }); renderList(); });
           return;
         }
         default: return;
@@ -1289,7 +1315,6 @@ function startListPoll() {
   listPoll = setInterval(async () => {
     if (!onShop()) { clearInterval(listPoll); return; }
     if (!sheet.hidden || document.visibilityState !== 'visible' || ['INPUT', 'TEXTAREA', 'SELECT'].includes((document.activeElement || {}).tagName)) return;
-    if (S.pendingDel.size || S.pendingClear) return;
     try {
       const r = await api('list.get');
       if (JSON.stringify(r.items) !== S.lastListJson) renderList();
@@ -1625,10 +1650,16 @@ async function renderProducts() {
       return rows.length ? `<details class="card flush home-group" data-group="${k}" ${open[k] ? 'open' : ''}><summary><b>${label}</b><span class="muted">${rows.length}</span></summary>
         <ul class="list">${rows.map(homeRow).join('')}</ul></details>` : '';
     }).join('');
+    // things that ran out lately, so a mistaken "Out" is one tap from coming back
+    const lately = S.products.filter((p) => isFood(p) && pantryState(p) === 'out' && p.pantry_at && (Date.now() - new Date(String(p.pantry_at).replace(' ', 'T')).getTime()) < 14 * 86400000)
+      .sort((a, b) => String(b.pantry_at).localeCompare(String(a.pantry_at))).slice(0, 8);
+    const latelyHtml = lately.length ? `<details class="card flush home-group" data-group="out" ${open.out ? 'open' : ''}><summary><b>Ran out lately</b><span class="muted">${lately.length}</span></summary>
+      <ul class="list">${lately.map(homeRow).join('')}</ul></details>` : '';
     return `${useSoonHtml()}
       ${low.length ? `<section class="card flush"><h2 class="pad">Running low</h2><ul class="list">${low.map(homeRow).join('')}</ul></section>` : ''}
       ${groups || (low.length ? '' : `<section class="card stack tight"><b>Nothing at home yet</b><span class="small muted">What you buy lands here when you tap <b>Done shopping</b>. Already have something? Find it above and tap <b>I have this</b>.</span></section>`)}
-      ${home.length ? '<p class="small muted center">Tap Plenty / Low to update. Out moves it to Buy again in Shop. Cooking and logging food use things up for you.</p>' : ''}`;
+      ${latelyHtml}
+      ${home.length ? '<p class="small muted center">Tap Plenty / Low to change how much is at home. Cooking and logging food use things up for you.</p>' : ''}`;
   };
 
   const sortKey = (p) => {
@@ -1674,15 +1705,7 @@ async function renderProducts() {
   }, true);
   view.onclick = async (e) => {
     const chip = e.target.closest('[data-pantry]');
-    if (chip) {
-      const p = S.products.find((x) => x.id === Number(chip.dataset.pantry));
-      try {
-        const st = await cyclePantry(p);
-        toast(st === 'out' ? `${p.name} is out. It's under Buy again in Shop.` : `${p.name}: ${PANTRY_LABEL[st]}`);
-        draw();
-      } catch (er) { fail(er); }
-      return;
-    }
+    if (chip) return homeSheet(S.products.find((x) => x.id === Number(chip.dataset.pantry)), draw);
     const sortBtn = e.target.closest('[data-sort]');
     if (sortBtn) { store.set('prodSort', sortBtn.dataset.sort); return draw(); }
     const act = e.target.closest('[data-act]');
@@ -2145,7 +2168,7 @@ function productView(p, { from = 'products', item = null } = {}) {
     ${swap ? swapCardHtml(p, swap) : ''}
     ${item ? `<div class="grid2"><button class="btn primary" data-act="item-price">${pr.here && !pr.shared ? 'Change the price' : `Add the ${esc(storeName(S.storeId))} price`}</button><button class="btn" data-act="edit">Edit product</button></div>`
       : `<div class="grid2"><button class="btn primary" data-act="add">Add to list</button><button class="btn" data-act="edit">Edit</button></div>
-        ${isFood(p) && !atHome(p) ? '<button class="btn block" data-act="have">I have this at home</button>' : ''}`}`);
+        ${isFood(p) ? `<button class="btn block" data-act="have">${atHome(p) ? `At home: ${PANTRY_LABEL[pantryState(p)].toLowerCase()} · change` : 'I have this at home'}</button>` : ''}`}`);
   sheetBody.onclick = async (e) => {
     const t = e.target.closest('[data-act],[data-code]');
     if (!t) return;
@@ -2155,11 +2178,7 @@ function productView(p, { from = 'products', item = null } = {}) {
         case 'xray': return xraySheet(p, () => productView(p, { from, item }));
         case 'swaps': return swapsSheet(p, () => productView(p, { from, item }));
         case 'item-price': closeSheet(); if (await askItemPrice(item)) route(); return;
-        case 'have': {
-          await api('pantry.set', { product_id: p.id, amount: pantryAmountFor(p, 'plenty') });
-          p.pantry = pantryAmountFor(p, 'plenty'); if (!p.bought_count) p.bought_count = 1;
-          closeSheet(); toast(`${p.name} is in your Kitchen`); return route();
-        }
+        case 'have': return homeSheet(p);
         case 'edit': closeSheet(); return productEditor(p);
         case 'add': await api('list.add', { product_id: p.id, qty: 1 }); closeSheet(); toast(`${p.name} added to the list`); return route();
         default:
@@ -2753,6 +2772,8 @@ function recipeEditor(r) {
   // ----- ingredient search: your products first, then the whole catalogue, then "add it as new" -----
   const find = document.getElementById('ingFind');
   const sug = document.getElementById('ingSuggest');
+  sug.onpointerdown = (e) => e.preventDefault();   // keep the keyboard up mid-tap (see the shopping list)
+  sug.onmousedown = (e) => e.preventDefault();
   let seq = 0;
   const addRow = (p) => {
     if (!prodOf(p.id)) S.products.push(p);
@@ -2937,6 +2958,55 @@ const PANTRY_LABEL = { plenty: 'Plenty at home', low: 'Low', out: 'Out' };
 const PANTRY_NEXT = { plenty: 'low', low: 'out', out: 'plenty' };
 const pantryAmountFor = (p, st) => (st === 'plenty' ? (p.pack_size || 1) : st === 'low' ? (p.pack_size || 1) * 0.25 : 0);
 const pantryChip = (p) => { const st = pantryState(p); return st ? `<button type="button" class="home-chip home-${st}" data-pantry="${p.id}" aria-label="${esc(p.name)}: ${PANTRY_LABEL[st]}. Tap to change">${PANTRY_LABEL[st]}</button>` : ''; };
+/** Buy again: low things, and things that ran out lately or that you buy regularly. Never hundreds. */
+function buyAgain(onList) {
+  const recent = (p) => p.pantry_at && (Date.now() - new Date(String(p.pantry_at).replace(' ', 'T')).getTime()) < 21 * 86400000;
+  return S.products.filter((p) => !onList.has(p.id) && !p.skip_again && (pantryState(p) === 'low' || (pantryState(p) === 'out' && (recent(p) || (p.bought_count || 0) >= 2))))
+    .sort((a, b) => String(b.pantry_at || '').localeCompare(String(a.pantry_at || '')) || (b.bought_count || 0) - (a.bought_count || 0))
+    .slice(0, 20);
+}
+
+/** How much is at home: Plenty / Low / Out, or an exact number of packs. Every change can be undone. */
+function homeSheet(p, done = () => route()) {
+  const pack = p.pack_size || 1;
+  const unit = p.unit || 'each';
+  const packs = (p.pantry || 0) / pack;
+  const st = pantryState(p) || 'out';
+  openSheet(`${sheetHead(p.name)}
+    <p class="small muted">How much is at home? Cooking and logging food take from this for you.</p>
+    <div class="seg3">${['plenty', 'low', 'out'].map((k) => `<button type="button" class="btn ${k === st ? 'primary' : ''}" data-set="${k}">${k === 'plenty' ? 'Plenty' : k === 'low' ? 'Low' : 'Out'}</button>`).join('')}</div>
+    <form class="stack" id="homeForm">
+      <label>Packs at home${pack !== 1 || unit !== 'each' ? ` <span class="muted small">(1 pack = ${fmtQty(pack)} ${esc(unit)})</span>` : ''}
+        <div class="row"><button type="button" class="btn" data-step="-0.5" aria-label="Half a pack less">−</button><input name="packs" class="grow center" inputmode="decimal" value="${Math.round(packs * 100) / 100}"><button type="button" class="btn" data-step="0.5" aria-label="Half a pack more">+</button></div></label>
+      <button class="btn primary block">Save</button>
+    </form>`);
+  const form = document.getElementById('homeForm');
+  const save = async (amount) => {
+    const before = p.pantry || 0;
+    await api('pantry.set', { product_id: p.id, amount });
+    p.pantry = amount; p.pantry_at = new Date().toISOString().slice(0, 19).replace('T', ' '); if (!p.bought_count) p.bought_count = 1;
+    if (amount > 0) p.skip_again = false;
+    closeSheet(); done();
+    const now = pantryState(p);
+    undoToast(now === 'out' ? `${p.name} is out (it's under Buy again in Shop)` : `${p.name}: ${PANTRY_LABEL[now]}`, async () => {
+      await api('pantry.set', { product_id: p.id, amount: before }); p.pantry = before; done();
+    });
+  };
+  sheetBody.onclick = async (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    try {
+      if (b.dataset.set) return await save(pantryAmountFor(p, b.dataset.set));
+      if (b.dataset.step) { const v = Math.max(0, (parseFloat(String(form.packs.value).replace(',', '.')) || 0) + Number(b.dataset.step)); form.packs.value = Math.round(v * 100) / 100; }
+    } catch (er) { fail(er); }
+  };
+  sheetBody.onsubmit = async (e) => {
+    e.preventDefault();
+    const v = parseFloat(String(form.packs.value).replace(',', '.'));
+    if (!(v >= 0)) return toast('Type a number of packs, like 1 or 0.5');
+    try { await save(Math.round(v * pack * 1000) / 1000); } catch (er) { fail(er); }
+  };
+}
+
 /** Tap the chip: plenty → low → out → plenty. */
 async function cyclePantry(p) {
   const next = PANTRY_NEXT[pantryState(p) || 'out'];

@@ -580,3 +580,8 @@ p.center { text-align: center; }
 .scan-line { position: absolute; left: 10%; right: 10%; top: 50%; height: 2px; background: var(--accent); opacity: .8; pointer-events: none; }
 .tiny { font-size: 11px; margin: 0; }
 #scanTorch[hidden] { display: none; }
+
+/* at-home sheet */
+.seg3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+input.center { text-align: center; }
+.buy-again .icon-btn { opacity: .6; }

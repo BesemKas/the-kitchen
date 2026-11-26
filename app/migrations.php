@@ -322,6 +322,10 @@ const MIGRATIONS = [
         "ALTER TABLE stores ADD COLUMN branch_id INT UNSIGNED NULL, ADD FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL",
         "ALTER TABLE prices ADD INDEX store_time (store_id, recorded_at)",
     ],
+    // "Not needed" on Buy again: hidden until you buy it again
+    18 => [
+        "ALTER TABLE pantry ADD COLUMN skip_again TINYINT(1) NOT NULL DEFAULT 0",
+    ],
 ];
 
 function schema_version(): int

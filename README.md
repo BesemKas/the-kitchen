@@ -258,3 +258,12 @@ The Kitchen tab shows only what's at home, not every product.
 - Things arrive when you tap **Done shopping**, and get used up when you cook a recipe or log food in the diary. Tap Plenty / Low / Out to correct it. Out moves an item to **Buy again** on Shop.
 - Products in the **Household** aisle are not food: they count in the budget but never show here.
 - Searching (top of the screen) reaches every product. Open one and tap **I have this at home** to add something you already had.
+
+## Undo on the shopping list
+
+Removing an item, *Remove ticked* and *Clear list* happen straight away. *Undo* puts back exactly the items that were removed, nothing older, and never hides things you add afterwards. (`list.restore` takes the removed rows back from the app.)
+
+## Buy again and how much is at home
+
+- **Buy again** (Shop) lists things that are low, plus things that ran out in the last three weeks or that you buy regularly. It shows five, up to twenty with *Show all*. ✕ hides one until you buy it again.
+- Tapping an at-home chip (Kitchen) or *At home* on a product opens a sheet: Plenty / Low / Out, or the exact number of packs. Every change has Undo, and anything that ran out in the last two weeks is under **Ran out lately** in the Kitchen.
