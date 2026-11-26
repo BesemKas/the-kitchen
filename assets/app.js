@@ -1961,10 +1961,25 @@ function productEditor(p, { addToList = false } = {}) {
       // the chosen table, read several times and voted on; without one, the whole photo
       const parsed = table ? voteLabels(table) : parseLabelText(text);
       const ingredients = extractIngredients(text) || (table ? extractIngredients(table.join('\n')) : '');
+      if (parsed.misaligned) {
+        hint.innerHTML = "<b>The rows don't line up with their names</b>, which happens on curved jars, cans and bottles. Turn it so the table faces you straight on, with the table in the middle of the photo, and scan again. Or type the numbers.";
+        return;
+      }
+      // per 100 g drained: the pack size is the drained mass, the food you eat and pay for
+      const drained = /drain/i.test(`${table ? table.join('\n') : ''}\n${text}`);
+      const drainedG = drained ? drainedMass(text) || (table ? drainedMass(table.join('\n')) : null) : null;
+      let drainedNote = '';
+      if (drainedG) {
+        form.pack_size.value = drainedG; form.unit.value = 'g'; legend();
+        form.pack_size.classList.add('filled');
+        drainedNote = ` <span class="warn-text">This label is per 100 g <b>drained</b>, so the pack size is set to the drained mass (${fmtQty(drainedG)} g): the food you eat and pay for, without the brine.</span>`;
+      } else if (drained) {
+        drainedNote = ' <span class="warn-text">This label is per 100 g <b>drained</b>: set the pack size to the drained mass printed on the pack, not the net mass.</span>';
+      }
       const { values, servingFirst, found, guessed } = parsed;
       for (const el of sheetBody.querySelectorAll('.filled, .guessed')) el.classList.remove('filled', 'guessed');
       let filled = 0;
-      if (found >= 2) {
+      if (found >= 3) {
         for (const [k, v] of Object.entries(values)) {
           const el = form[`n_${k}`];
           if (el) { el.value = Math.round(v * 100) / 100; el.classList.add(guessed.includes(k) ? 'guessed' : 'filled'); filled++; }
@@ -1977,10 +1992,11 @@ function productEditor(p, { addToList = false } = {}) {
         ? `<b>Read ${filled} rows from the photo${servingFirst ? ' (the per 100 g column)' : ''}.</b> Check the highlighted numbers against the label before saving.`
           + (guessed.length ? ' <span class="warn-text">Orange ones were worked out from the per serving column.</span>' : '')
           + (missing.length ? ` Not read: ${missing.join(', ')}.${filled < 6 ? ' A closer photo, with the table filling the screen, reads more.' : ''}` : '')
+          + drainedNote
           + (form.unit.value === 'each' ? ' <span class="warn-text">These are per 100 g: set the unit to g or ml and the pack size above.</span>' : '')
           + (ingredients ? '' : ' Scan the ingredients list too.')
         : ingredients ? '<b>Ingredients filled in from the photo.</b> Check them before saving.'
-          : "<b>Couldn't read it.</b> Get closer so the table fills the screen, hold the phone straight above it, avoid glare, or type the numbers.";
+          : `<b>Couldn't read this label reliably</b>, so nothing was filled in.${drained || found ? ' Curved labels (jars, cans, bottles) and glossy packs are beyond this reader: typing the numbers is quicker.' : ' Get closer so the table fills the screen, hold the phone straight above it and avoid glare, or type the numbers.'}${drainedNote}`;
     } catch (er) {
       hint.innerHTML = was; fail(er);
     }
@@ -3126,6 +3142,8 @@ async function ocrFindTable(file, progress) {
       const k = 1 / whole.scale; const padY = (b.y1 - b.y0) * 0.04;
       const x0 = Math.max(0, b.x0 * k); const y0 = Math.max(0, (b.y0 - padY) * k);
       box = [x0, y0, Math.min(whole.bmp.width, b.x1 * k) - x0, Math.min(whole.bmp.height, (b.y1 + padY) * k) - y0];
+      // a "table" the size of the photo means it wasn't really found: let the person place the box
+      if (box[2] * box[3] > whole.bmp.width * whole.bmp.height * 0.6) box = null;
     }
   }
   return { text: data.text || '', bmp: whole.bmp, box };
@@ -3158,7 +3176,8 @@ function voteLabels(texts) {
     }
   }
   const servingFirst = parsed.filter((p) => p.servingFirst).length > parsed.length / 2;
-  return { values, servingFirst, found: Object.keys(values).length, guessed, texts };
+  const misaligned = parsed.filter((p) => p.misaligned).length > parsed.length / 2;
+  return { values, servingFirst, found: Object.keys(values).length, guessed, texts, misaligned };
 }
 
 /** Show the photo with a box to drag around the nutrition table. Resolves with the box in photo pixels, or null. */
@@ -3172,6 +3191,7 @@ function cropPicker(host, bmp, start) {
     c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
     host.innerHTML = `<div class="crop-wrap"><img alt="Your photo" src="${c.toDataURL('image/jpeg', 0.8)}"><div class="crop-box"><i class="h tl"></i><i class="h tr"></i><i class="h bl"></i><i class="h br"></i></div></div>
       <p class="small muted">Drag the corners so the box holds just the nutrition table, from the heading to the sodium row. Leave out the barcode and dates.</p>
+      <p class="small warn-text">On a jar, can or bottle: curved labels read badly. Turn it so the table faces you straight on and keep the table in the middle of the photo, or type the numbers.</p>
       <div class="grid2"><button type="button" class="btn primary" data-crop="read">Read the table</button><button type="button" class="btn" data-crop="cancel">Cancel</button></div>`;
     host.hidden = false;
     const wrap = host.querySelector('.crop-wrap'); const el = host.querySelector('.crop-box');
@@ -3286,6 +3306,9 @@ function parseLabelText(raw) {
     if (key === 'energy_kj' && kj.length >= 2) cols = 2;
     rows.push({ key, nums, kj, mg: nums.some((n) => n.unit === 'mg') });
   }
+  // curved labels: names and numbers drift apart, so "Energy" ends up beside protein's grams
+  const namedEnergy = rows.find((r) => r.key === 'energy_kj' && !r.kj.length && r.nums.length && LABEL_ROWS.find(([k]) => k === 'energy_kj')[1].test(lines.join(' ').toLowerCase()));
+  const misaligned = !!namedEnergy && rows.some((r) => r !== namedEnergy && r.kj.length);
   // the per 100 g value of a row: from the right-hand columns
   const pick = (r) => {
     if (r.key === 'energy_kj') {
@@ -3356,8 +3379,25 @@ function parseLabelText(raw) {
   for (const k of Object.keys(values)) if (!(values[k] >= 0) || values[k] > (limits[k] || 100)) delete values[k];
   if (values.satfat_g !== undefined && values.fat_g !== undefined && values.satfat_g > values.fat_g + 0.5) delete values.satfat_g;
   if (values.sugar_g !== undefined && values.carbs_g !== undefined && values.sugar_g > values.carbs_g + 0.5) delete values.sugar_g;
-  return { values, servingFirst, found: Object.keys(values).length, guessed: guessed.filter((k) => k in values) };
+  return { values, servingFirst, found: Object.keys(values).length, guessed: guessed.filter((k) => k in values), misaligned };
 }
+/** "Per 100 g drained" labels: the drained mass printed on the pack (130 g of peppers in a 280 g jar), or null. */
+function drainedMass(raw) {
+  const lines = String(raw).split(/\n+/);
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i].toLowerCase();
+    if (!/drain/.test(L) || !/mass|weight|massa/.test(L)) continue;
+    const grams = (l) => [...l.replace(/(\d),(\d)/g, '$1.$2').matchAll(/(\d+(?:\.\d+)?)\s*(kg|g)\b/gi)].map((m) => parseFloat(m[1]) * (m[2].toLowerCase() === 'kg' ? 1000 : 1));
+    const here = grams(lines[i]);
+    // "Net Mass  Drained Mass" with "280 g | 130 g" underneath: drained is the column after net
+    const both = /net/.test(L) && L.indexOf('net') < L.indexOf('drain');
+    const pick = (list) => (list.length >= 2 && both ? list[1] : list.length ? list[list.length - 1] : null);
+    const v = pick(here.length ? here.filter((_, n) => !both || here.length >= 2 || n === 0) : grams(lines[i + 1] || ''));
+    if (v && v > 0 && v < 20000) return v;
+  }
+  return null;
+}
+
 /** The ingredients list from a photo: everything after "Ingredients" up to allergens/storage/nutrition text. */
 function extractIngredients(raw) {
   const t = String(raw).replace(/\s*\n\s*/g, ' ');

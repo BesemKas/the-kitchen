@@ -288,4 +288,8 @@ In the product editor, **Scan the label** reads a photo on the phone with Tesser
 
 The parser matches rows by name, places rows whose names didn't read by the label's fixed order, takes the per 100 g column (only numbers with a unit count as columns, so dates are ignored), uses the per serving column to catch lost decimal points, and fixes common misreads ("(g)" read as "(9)", "16.48" for 16.4 g, "05" for 0.5, "ME" for mg). Filled numbers are highlighted; ones worked out from the per serving column are orange. The energy check says when the numbers don't add up, including when the label itself is off.
 
+**Jars, cans and bottles.** Curved labels read badly: rows bend away from their names. The crop step says to turn the pack so the table faces the camera. If a row named Energy sits beside a number that isn't kJ while kJ is on another line, the rows have drifted, and the app asks for a straight-on photo instead of filling shifted numbers. Fewer than three rows read means nothing is filled. On a real jar (Peppadew) the reader got 1–2 of 8 rows even with a good box, so for jars typing is quicker until the mobile app's reader.
+
+**Drained products** ("per 100 g drained"): the pack size should be the drained mass (130 g of peppers in a 280 g jar), because that's the food you eat and pay for. The app sets it when it can read the drained mass, and says so either way.
+
 Honest limit: Tesseract is weak on narrow fonts and dotted leader lines. On a real cheese label a well-placed box read 9 of 12 rows with none wrong, a loosely placed one 3–5. Always check before saving. The planned mobile app's on-device reader (ML Kit) is much stronger; the paid server reader (`anthropic_key` in config.php) is used instead when set.
