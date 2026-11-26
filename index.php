@@ -148,7 +148,7 @@ if ($user && $page !== 'privacy') {
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="assets/icon-180.png">
-<link rel="stylesheet" href="assets/app.css?v=33">
+<link rel="stylesheet" href="assets/app.css?v=34">
 </head>
 <?php if (!$user || $page === 'privacy'): ?>
 <body class="auth">
@@ -161,6 +161,7 @@ if ($user && $page !== 'privacy') {
   <div class="stack small">
     <p>Kitchen Budget is a small personal app. It keeps what you type or scan: your username, display name, a hashed password (nobody can read it), shopping lists, shops and prices, meal plans, cooked portions, budget, takeaways, ingredient alerts and the recipes you add.</p>
     <p><b>Who sees it:</b> only you, unless you join a household. In a household everyone sees each other's recipes and the people's names; if the household shares its kitchen, the shopping list, pantry, shops and prices, meal plan, fridge and grocery budget are shared too (your takeaways, ingredient alerts and targets stay yours). Product facts (names, barcodes, nutrition, label photos) are shared with everyone so a scan helps all users. Recipes are private unless you tap “Share with everyone”.</p>
+    <p><b>Prices:</b> prices you log at a chain shop (like Checkers or Boxer) are shown to other people who shop at that chain, without your name or anything else about you. Prices at Spar, OK Foods, Food Lover's Market and shops that aren't a chain are never shared.</p>
     <p><b>Where it lives:</b> on the app's web host in a MySQL database, with nightly backups. It is never sold or shared. Barcodes are looked up on Open Food Facts; if label reading is switched on, label photos are sent to Anthropic's Claude to read the numbers.</p>
     <p><b>Pilot numbers:</b> to see whether the app is working, it notes which days you open it, whether each barcode you scan was already known (not which product), and the feedback you send. The person who runs the app sees these as totals per week, plus your feedback with your name.</p>
     <p><b>Open Food Facts:</b> only if you say yes, products you add (name, brand, pack size, ingredients, nutrition and label photos) are added to Open Food Facts, a free public food database. Once there they are public under open licences (ODbL for the data, CC BY-SA for photos). Your name, prices, lists, plans and budget are never sent. You can switch this off under Me.</p>
@@ -227,7 +228,7 @@ if ($user && $page !== 'privacy') {
 <div id="sheet" class="sheet" hidden><div class="sheet-body" id="sheetBody"></div></div>
 <div id="toast" class="toast" hidden></div>
 <script src="assets/zxing-browser.min.js"></script>
-<script src="assets/app.js?v=33"></script>
+<script src="assets/app.js?v=34"></script>
 </body>
 <?php endif; ?>
 </html>

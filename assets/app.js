@@ -1526,7 +1526,7 @@ function quickAddSheet(p) {
   openSheet(`${sheetHead(p.name)}
     <form class="stack" id="qaForm">
       <p class="muted small">${[esc(p.brand || ''), packLabel(p), unitPrice(p, pr.price)].filter(Boolean).join(' · ')}</p>
-      ${pr.shared ? `<p class="small muted">${money(pr.price)} is what someone else paid at ${esc((S.stores.find((x) => String(x.id) === String(pr.storeId)) || {}).chain || 'this chain')} ${sinceLabel(pr.at)}. Log your shop to keep your own price.</p>` : ''}
+      ${pr.shared ? `<p class="small muted">${money(pr.price)} is what someone else paid at ${esc(storeName(pr.storeId))} ${sinceLabel(pr.at)}. Log your shop to keep your own price.</p>` : ''}
       ${healthBadges(p, { long: true }) || proteinCost(p, pr.price) !== null ? `<p class="small">${healthBadges(p, { long: true })} ${proteinCost(p, pr.price) !== null ? `<span class="protein-cost">${proteinLabel(proteinCost(p, pr.price))}</span>` : ''}</p>` : ''}
       ${status}
       ${cheaper ? `<p class="small hint">${cheaper}</p>` : ''}
@@ -1753,7 +1753,7 @@ function productEditor(p, { addToList = false } = {}) {
 
       <label>At home now (${esc(p.unit === 'each' ? 'items' : p.unit || 'each')}) <input name="pantry" type="number" inputmode="decimal" step="0.001" min="0" value="${p.pantry ? round(p.pantry, 3) : ''}" placeholder="0"></label>
       <fieldset><legend>Price per pack</legend>
-        ${S.stores.map((s) => `<label>${esc(s.name)} <input name="price_${s.id}" type="number" inputmode="decimal" step="0.01" min="0" value="${p.prices && p.prices[s.id] && !p.prices[s.id].shared ? p.prices[s.id].price : ''}" ${p.prices && p.prices[s.id] && p.prices[s.id].shared ? `placeholder="≈ ${p.prices[s.id].price.toFixed(2)} (others at this chain)"` : ''}></label>`).join('') || '<p class="muted small">Add shops under Me (your initial at the top) first.</p>'}
+        ${S.stores.map((s) => `<label>${esc(s.name)} <input name="price_${s.id}" type="number" inputmode="decimal" step="0.01" min="0" value="${p.prices && p.prices[s.id] && !p.prices[s.id].shared ? p.prices[s.id].price : ''}" ${p.prices && p.prices[s.id] && p.prices[s.id].shared ? `placeholder="≈ ${p.prices[s.id].price.toFixed(2)} (what others paid here)"` : ''}></label>`).join('') || '<p class="muted small">Add shops under Me (your initial at the top) first.</p>'}
       </fieldset>
 
       <fieldset class="stack"><legend id="nutLegend"></legend>
@@ -2884,20 +2884,6 @@ function sinceLabel(d) {
   return days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
 }
 
-/* ----- chains: prices are the same at every branch of a chain, so they're shared within the chain ----- */
-function chainSheet(shop, done) {
-  if (!shop) return;
-  const chains = S.chains || [];
-  openSheet(`${sheetHead(`Which chain is ${esc(shop.name)}?`)}
-    <p class="small muted">Prices are the same at every branch of a chain, so the app shows what others paid at the same chain where you haven't priced something yet. Each chain is separate, even within a group (Checkers and Shoprite don't share).</p>
-    <div class="stack tight">${chains.map((c) => `<button type="button" class="btn block ${c === shop.chain ? 'primary' : ''}" data-chain="${esc(c)}">${esc(c)}${(S.perShopChains || []).includes(c) ? ' <span class="small muted">· prices per shop</span>' : ''}</button>`).join('')}
-      <button type="button" class="btn block ${shop.chain ? '' : 'primary'}" data-chain="">Not a chain (a market, butcher, spaza…)</button></div>`);
-  sheetBody.onclick = async (e) => {
-    const b = e.target.closest('[data-chain]'); if (!b) return;
-    try { await api('stores.chain', { id: shop.id, chain: b.dataset.chain }); closeSheet(); toast(b.dataset.chain ? `${shop.name} is ${b.dataset.chain}` : `${shop.name}: not a chain`); done(); } catch (er) { fail(er); }
-  };
-}
-
 /* ----- the shared catalogue: your products are on the phone, the rest are a search away ----- */
 const searchedTerms = new Set();
 /** Ask the server for catalogue products matching a search; resolves true when new ones arrived. */
@@ -3402,10 +3388,9 @@ async function renderBudget(mode = 'money') {
     <section class="card stack">
       <h2>Shopping</h2>
       <div class="small muted">Your shops</div>
-      <ul class="list">${S.stores.map((s) => `<li class="shop-row"><span class="grow">${esc(s.name)}<span class="small muted block">${s.chain ? `${esc(s.chain)}${(S.perShopChains || []).includes(s.chain) ? ' · prices per shop' : ''}` : 'Not a chain · prices per shop'}</span></span><button class="btn small" data-chain-of="${s.id}">Chain</button><button class="btn small" data-rename="${s.id}">Rename</button><button class="icon-btn" data-del-store="${s.id}" aria-label="Delete">✕</button></li>`).join('')}</ul>
+      <ul class="list">${S.stores.map((s) => `<li class="shop-row"><span class="grow">${esc(s.name)}</span><button class="btn small" data-rename="${s.id}">Rename</button><button class="icon-btn" data-del-store="${s.id}" aria-label="Delete">✕</button></li>`).join('')}</ul>
       <form class="row" id="storeForm"><input name="name" class="grow" placeholder="Add a shop"><button class="btn">Add</button></form>
-      <div class="toggle-row static"><span class="grow"><b>Share prices within each chain</b><span class="small muted block">Prices are the same at every branch of a chain. Where you haven't priced something yourself, you see what others paid at the same chain in the last 60 days, and they see yours. No names. Never shared between chains (Checkers and Shoprite are separate), and never for Spar, OK Foods or Food Lover's Market, where each shop sets its own prices. Off means you don't see theirs either.</span></span>
-        <button type="button" class="switch ${S.sharePrices !== '0' ? 'on' : ''}" data-act="share-prices" aria-pressed="${S.sharePrices !== '0'}" aria-label="Share prices within each chain"><i></i></button></div>
+
       <div class="stack tight"><span class="small muted">Aisle order (how the shopping list is grouped)</span>
         <ul class="list card flush" id="aisleEd">${(S.aisles || []).map((a, i) => `<li><span class="grow">${esc(a)}</span><button type="button" class="icon-btn" data-aisle-up="${i}" aria-label="Move ${esc(a)} up" ${i ? '' : 'disabled'}>↑</button><button type="button" class="icon-btn" data-aisle-del="${i}" aria-label="Remove ${esc(a)}">✕</button></li>`).join('')}</ul>
         <form class="row" id="aisleAdd"><input name="aisle" class="grow" placeholder="Add an aisle"><button class="btn">Add</button></form>
@@ -3487,7 +3472,7 @@ async function renderBudget(mode = 'money') {
     } catch (er) { fail(er); }
   };
   view.onclick = async (e) => {
-    const t = e.target.closest('[data-day],[data-act],[data-del-trip],[data-del-store],[data-rename],[data-chain-of],[data-aisle-up],[data-aisle-del]');
+    const t = e.target.closest('[data-day],[data-act],[data-del-trip],[data-del-store],[data-rename],[data-aisle-up],[data-aisle-del]');
     if (!t) return;
     try {
       if (t.dataset.aisleUp || t.dataset.aisleDel) {
@@ -3504,11 +3489,6 @@ async function renderBudget(mode = 'money') {
         await api('stores.delete', { id: t.dataset.delStore }); await refreshStores();
         if (String(S.storeId) === String(t.dataset.delStore)) S.storeId = S.stores[0] ? String(S.stores[0].id) : null;
         return again();
-      }
-      if (t.dataset.chainOf) return chainSheet(S.stores.find((x) => String(x.id) === t.dataset.chainOf), async () => { await refreshStores(); again(); });
-      if (t.dataset.act === 'share-prices') {
-        const r = await api('prices.share', { share: S.sharePrices === '0' });
-        S.sharePrices = r.share_prices; toast(r.share_prices === '1' ? 'Sharing prices within each chain' : 'Not sharing prices'); return again();
       }
       if (t.dataset.rename) {
         const name = prompt('New name', storeName(t.dataset.rename));
@@ -3896,7 +3876,7 @@ async function joinSheet(token, isNew) {
 (async function init() {
   try {
     const b = await api('bootstrap');
-    Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader, sharePrices: b.share_prices, chains: b.chains || [], perShopChains: b.per_shop_chains || [],
+    Object.assign(S, { user: b.user, users: b.users, stores: b.stores, budget: b.budget, spent: b.spent, month: b.month, labelReader: !!b.label_reader, 
       alerts: Array.isArray(b.alerts) ? {} : (b.alerts || {}), period: b.period, payday: b.payday, isAdmin: !!b.is_admin, signupsOpen: !!b.signups_open, household: b.household || null, offReady: !!b.off_ready, offShare: b.off_share || '', checkin: b.checkin || null });
     const saved = store.get('store', null);
     S.storeId = S.stores.some((s) => String(s.id) === String(saved)) ? String(saved) : (S.stores[0] ? String(S.stores[0].id) : null);
