@@ -19,3 +19,15 @@ DirectoryIndex index.php
 <IfModule mod_mime.c>
     AddType application/manifest+json .webmanifest
 </IfModule>
+
+# Label reader files (assets/ocr): compressed on the way out, cached for a year (they never change in place)
+<IfModule mod_deflate.c>
+    <FilesMatch "\.(js|traineddata)$">
+        SetOutputFilter DEFLATE
+    </FilesMatch>
+</IfModule>
+<IfModule mod_headers.c>
+    <FilesMatch "\.(traineddata|wasm\.js)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+</IfModule>

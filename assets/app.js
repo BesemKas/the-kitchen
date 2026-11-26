@@ -1867,13 +1867,13 @@ function productEditor(p, { addToList = false } = {}) {
 
       <fieldset class="stack"><legend id="nutLegend"></legend>
         <div class="row wrap gap">
-          <button type="button" class="btn small" data-act="photo">📷 Photo of the label</button>
+          <button type="button" class="btn small" data-act="photo">📷 Scan the label</button>
           <button type="button" class="btn small" data-act="off">Open Food Facts</button>
           <button type="button" class="btn small" data-act="standard">Standard values</button>
         </div>
         <input type="file" id="labelFile" accept="image/*" capture="environment" hidden>
         <div id="photoBox" class="photo-box"></div>
-        <p class="small muted" id="labelHint">Type it from the label's <b>per 100 g</b> column, in the label's order.${S.labelReader ? ' Or take a photo and the app reads it for you.' : ''}</p>
+        <p class="small muted" id="labelHint">Scan the nutrition table (then the ingredients) and the app fills this in, or type it from the label's <b>per 100 g</b> column.</p>
         <div class="grid2">${NUTRIENTS.map(([k, label, unit]) => `<label>${label} (${unit}) <input name="n_${k}" type="number" inputmode="decimal" step="0.01" min="0" value="${p[k] ?? ''}"></label>`).join('')}</div>
         <p class="small warn-text" id="kjWarn" hidden></p>
         <label>Ingredients <textarea name="ingredients" rows="3" placeholder="As printed on the pack (optional)">${esc(p.ingredients || '')}</textarea></label>
@@ -1901,7 +1901,8 @@ function productEditor(p, { addToList = false } = {}) {
   };
   const drawCheck = () => {
     const n = {}; for (const [k] of NUTRIENTS) n[k] = form[`n_${k}`].value;
-    const w = form.unit.value === 'each' ? '' : energyCheck(n);
+    // label tables are per 100 g, so numbers from a scan are always checked
+    const w = form.unit.value === 'each' && !sheetBody.querySelector('input.filled') ? '' : energyCheck(n);
     const el = document.getElementById('kjWarn'); el.textContent = w; el.hidden = !w;
   };
   const drawPhotos = () => {
@@ -1918,7 +1919,7 @@ function productEditor(p, { addToList = false } = {}) {
       try {
         pendingPhoto = await shrinkPhoto(e.target.files[0]);
         drawPhotos();
-        if (!S.labelReader) { toast('Photo kept with the product. Type the numbers from it'); return; }
+        if (!S.labelReader) return await readOnPhone(e.target.files[0]);
         toast('Reading the label…');
         const r = await api('label.read', { data: pendingPhoto, mime: 'image/jpeg' });
         let filled = 0;
@@ -1930,7 +1931,35 @@ function productEditor(p, { addToList = false } = {}) {
       } catch (er) { fail(er); }
     }
   };
+  // read the photo on the phone: fill what it finds, mark it, and leave the checking to the person
+  async function readOnPhone(file) {
+    const hint = document.getElementById('labelHint');
+    const was = hint.innerHTML;
+    try {
+      hint.textContent = 'Reading the label…';
+      const text = await ocrRead(file, (m) => {
+        if (m.status === 'loading language traineddata' || m.status === 'loading tesseract core') hint.textContent = 'Getting the label reader ready (the first time takes a minute)…';
+        else if (m.status === 'recognizing text') hint.textContent = `Reading the label… ${Math.round((m.progress || 0) * 100)}%`;
+      });
+      const { values, servingFirst, found } = parseLabelText(text);
+      const ingredients = extractIngredients(text);
+      for (const el of sheetBody.querySelectorAll('.filled')) el.classList.remove('filled');
+      let filled = 0;
+      if (found >= 2) {
+        for (const [k, v] of Object.entries(values)) { const el = form[`n_${k}`]; if (el) { el.value = Math.round(v * 100) / 100; el.classList.add('filled'); filled++; } }
+      }
+      if (ingredients && (!form.ingredients.value || filled === 0)) { form.ingredients.value = ingredients; form.ingredients.classList.add('filled'); }
+      drawHealth(); drawCheck();
+      hint.innerHTML = filled
+        ? `<b>Filled ${filled} of ${NUTRIENTS.length} from the photo${servingFirst ? ' (the per 100 g column)' : ''}.</b> Check the highlighted numbers against the label before saving.${form.unit.value === 'each' ? ' <span class="warn-text">These are per 100 g: set the unit to g or ml and the pack size above.</span>' : ''}${ingredients ? '' : ' Scan the ingredients list too.'}`
+        : ingredients ? '<b>Ingredients filled in from the photo.</b> Check them before saving.'
+          : "<b>Couldn't read it.</b> Get closer, hold the phone straight above the table, avoid glare, or type the numbers.";
+    } catch (er) {
+      hint.innerHTML = was; fail(er);
+    }
+  }
   sheetBody.oninput = (e) => {
+    if (e.target.classList && e.target.classList.contains('filled')) e.target.classList.remove('filled');
     if (e.target.name && e.target.name.startsWith('n_')) drawCheck();
     if (e.target.name === 'ingredients') drawHealth();
   };
@@ -2997,6 +3026,119 @@ function sinceLabel(d) {
   if (!d) return 'lately';
   const days = Math.floor((Date.now() - new Date(String(d).replace(' ', 'T')).getTime()) / 86400000);
   return days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
+}
+
+/* ----- reading a label on the phone (Tesseract, free, nothing leaves the phone) ----- */
+let ocrWorker = null;
+function loadScript(src) {
+  return new Promise((ok, bad) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => bad(new Error('Could not load the label reader')); document.head.appendChild(s); });
+}
+/** Start the reader once; the first time it downloads about 8 MB, then the phone keeps it. */
+async function ocrWorkerGet(progress) {
+  if (ocrWorker) return ocrWorker;
+  if (!window.Tesseract) await loadScript('assets/ocr/tesseract.min.js');
+  const abs = (p) => new URL(p, location.href).href;
+  ocrWorker = await window.Tesseract.createWorker('eng', 1, {
+    workerPath: abs('assets/ocr/worker.min.js'), corePath: abs('assets/ocr/core'), langPath: abs('assets/ocr/lang'),
+    gzip: false, workerBlobURL: false,
+    logger: (m) => progress && progress(m),
+  });
+  return ocrWorker;
+}
+/** A photo, upright, at most 2000 px, grey with stretched contrast: what Tesseract reads best. */
+async function ocrPrepare(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => createImageBitmap(file));
+  const scale = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  const img = g.getImageData(0, 0, c.width, c.height); const d = img.data;
+  let lo = 255; let hi = 0;
+  for (let i = 0; i < d.length; i += 4) { const v = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; d[i] = v; if (v < lo) lo = v; if (v > hi) hi = v; }
+  const span = Math.max(1, hi - lo);
+  for (let i = 0; i < d.length; i += 4) { const v = Math.max(0, Math.min(255, ((d[i] - lo) * 255) / span)); d[i] = d[i + 1] = d[i + 2] = v; }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+async function ocrRead(file, progress) {
+  const w = await ocrWorkerGet(progress);
+  const { data } = await w.recognize(await ocrPrepare(file));
+  return data.text || '';
+}
+
+const LABEL_ROWS = [
+  // checked in this order: "of which saturated" before "fat", "of which sugar" before "carbohydrate"
+  ['satfat_g', /satur|versadig/],
+  ['sugar_g', /sugar|suiker/],
+  ['energy_kj', /energ|kilojoule|\bkj\b/],
+  ['protein_g', /prote/],
+  ['carbs_g', /carbo|glycaemic|glycemic|koolhidra/],
+  ['fibre_g', /fib(re|er)|vesel/],
+  ['sodium_mg', /sodium|natrium/],
+  ['salt_g', /\bsalt\b|\bsout\b/],
+  ['fat_g', /\bfat\b|\btotal fat|\bvet\b/],
+];
+/** Turn the text of a nutrition table into per-100 g values. Picks the 100 g column, whichever side it's on. */
+function parseLabelText(raw) {
+  const fix = (l) => l
+    .replace(/\(\s*(?:k\s?j|kcal|m?[g9]|m[li1]|%)\s*\)/gi, ' ')   // "(g)", read as "(9)" too, and other unit labels
+    .replace(/(\d)\s?m[i1](?=\b|\s)/g, '$1 ml')
+    .replace(/(\d)[oO](?=\d|\b)/g, '$10').replace(/(^|[\s(])[oO](?=[.,]\d)/g, '$10').replace(/(\d)[lI|](?=\d)/g, '$11')
+    .replace(/(\d),(\d)/g, '$1.$2').replace(/(\d)\s+\.(\d)/g, '$1.$2');
+  const lines = String(raw).split(/\n+/).map((l) => fix(l.trim())).filter(Boolean);
+  let servingFirst = false;
+  for (const l of lines) {
+    const L = l.toLowerCase();
+    const i100 = L.search(/100\s*(g|ml|m1|mi|9)\b/);
+    const iSrv = L.search(/serv|portion|portie|per slice|per biscuit|per bar/);
+    if (i100 >= 0 && iSrv >= 0) { servingFirst = iSrv < i100; break; }
+  }
+  const nums = (l) => {
+    const per100 = /per\s*100/i.test(l);
+    return [...l.matchAll(/(\d+(?:\.\d+)?)\s*(kj|kcal|cal|mg|g|ml|%)?/gi)]
+      .map((m) => ({ v: parseFloat(m[1]), unit: (m[2] || '').toLowerCase() }))
+      .filter((x) => x.unit !== '%' && !(per100 && x.v === 100 && (x.unit === 'g' || x.unit === 'ml')));
+  };
+  const out = {};
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i].toLowerCase();
+    if (/100\s*(g|ml)/.test(L) && /per|serv/.test(L) && !/\d+\s*kj/.test(L)) continue;   // a header line
+    const row = LABEL_ROWS.find(([, re]) => re.test(L));
+    if (!row || out[row[0]] !== undefined) continue;
+    if (row[0] === 'fat_g' && /satur|trans|mono|poly|unsat|versadig/.test(L)) continue;
+    if (row[0] === 'carbs_g' && /sugar|suiker/.test(L)) continue;
+    let n = nums(lines[i]);
+    if (!n.length && lines[i + 1] && !LABEL_ROWS.some(([, re]) => re.test(lines[i + 1].toLowerCase()))) n = nums(lines[i + 1]);
+    if (!n.length) continue;
+    let pick;
+    if (row[0] === 'energy_kj') {
+      const kj = n.filter((x) => x.unit === 'kj'); const kcal = n.filter((x) => x.unit === 'kcal' || x.unit === 'cal');
+      if (kj.length) pick = (servingFirst ? kj[1] || kj[0] : kj[0]).v;
+      else if (kcal.length) pick = Math.round((servingFirst ? kcal[1] || kcal[0] : kcal[0]).v * 4.184);
+      else pick = (servingFirst ? n[1] || n[0] : n[0]).v;
+    } else {
+      const x = servingFirst ? n[1] || n[0] : n[0];
+      pick = x.v;
+      if (row[0] === 'sodium_mg' && x.unit === 'g') pick *= 1000;
+    }
+    out[row[0]] = pick;
+  }
+  if (out.sodium_mg === undefined && out.salt_g !== undefined) out.sodium_mg = Math.round(out.salt_g * 400);
+  delete out.salt_g;
+  const limits = { energy_kj: 3800, sodium_mg: 40000 };
+  for (const k of Object.keys(out)) if (!(out[k] >= 0) || out[k] > (limits[k] || 100)) delete out[k];
+  if (out.satfat_g !== undefined && out.fat_g !== undefined && out.satfat_g > out.fat_g + 0.5) delete out.satfat_g;
+  return { values: out, servingFirst, found: Object.keys(out).length };
+}
+/** The ingredients list from a photo: everything after "Ingredients" up to allergens/storage/nutrition text. */
+function extractIngredients(raw) {
+  const t = String(raw).replace(/\s*\n\s*/g, ' ');
+  const m = t.match(/ingredi[eë]nt[se]?\s*[:;.\-]?\s*(.+)/i);
+  if (!m) return '';
+  const body = m[1].split(/\b(?:allergens?|contains|may contain|nutrition|typical|storage|store in|keep refrigerated|best before|use by|manufactured|produced|packed|warning)/i)[0];
+  const clean = body.replace(/\s{2,}/g, ' ').replace(/[|]/g, 'l').trim().replace(/[.;,]\s*$/, '');
+  return clean.length > 10 ? clean.slice(0, 4000) : '';
 }
 
 /* ----- the shared catalogue: your products are on the phone, the rest are a search away ----- */
