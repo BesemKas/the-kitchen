@@ -2366,32 +2366,24 @@ try {
             out(['household' => null]);
 
         case 'admin.off_import':
-            // load one page (100) of South African products from Open Food Facts into the shared catalogue;
-            // the app calls this every 7 seconds, inside their limit of 10 searches a minute
+            // load South African products from data/off-za.jsonl.gz (built from Open Food Facts' data export by a
+            // GitHub Action) into the shared catalogue, 400 lines per call; no calls to Open Food Facts at all
             empty($user['is_admin']) && fail('Admins only', 403);
-            function_exists('curl_init') || fail('This server cannot reach Open Food Facts');
-            $page = int_in($in, 'page', false) ?: (int)setting('off_import_page', '1');
-            $fields = 'code,product_name,brands,quantity,product_quantity,product_quantity_unit,nutriments,nutriscore_grade,nova_group,additives_tags,ingredients_text_en,ingredients_text';
-            // Open Food Facts answers 503 whenever its shared search limit is used up; the app waits and tries again
-            try {
-                [$code, $body] = off_http("/api/v2/search?countries_tags=en:south-africa&fields=$fields&page_size=100&page=$page", null, 45);
-            } catch (RuntimeException $e) {
-                [$code, $body] = [0, ''];
-            }
-            $d = json_decode($body, true);
-            if ($code !== 200 || !is_array($d)) {
-                fail($code === 0 ? 'Open Food Facts took too long to answer' : "Open Food Facts is busy (HTTP $code)", 503);
-            }
-            $added = $updated = 0;
-            foreach ((array)($d['products'] ?? []) as $op) {
+            $file = __DIR__ . '/data/off-za.jsonl.gz';
+            is_readable($file) || fail("The South African product file isn't on the server yet. On GitHub, run the action \"South African products from Open Food Facts\", then deploy.", 404);
+            $from = int_in($in, 'from', false) ?: 0;
+            $gz = gzopen($file, 'rb');
+            $line = 0; $added = $updated = $skipped = 0; $done = true;
+            while (($raw = gzgets($gz, 1 << 20)) !== false) {
+                if ($line++ < $from) {
+                    continue;
+                }
+                if ($line > $from + 400) { $done = false; $line--; break; }
+                $op = json_decode($raw, true);
                 $bc = preg_replace('/\D/', '', (string)($op['code'] ?? ''));
-                if (!shareable_barcode($bc)) {
-                    continue;
-                }
+                if (!is_array($op) || !shareable_barcode($bc)) { $skipped++; continue; }
                 $s = off_parse(['status' => 1, 'product' => $op]);
-                if (!$s || !$s['name']) {
-                    continue;
-                }
+                if (!$s || !$s['name']) { $skipped++; continue; }
                 $id = q('SELECT id FROM products WHERE barcode = ?', [$bc])->fetchColumn();
                 if ($id) {
                     apply_off((int)$id, $s);   // fills only what's missing
@@ -2405,11 +2397,9 @@ try {
                 q('INSERT INTO products (' . implode(', ', array_keys($cols)) . ', off_checked_at) VALUES (' . implode(', ', array_fill(0, count($cols), '?')) . ', NOW())', array_values($cols));
                 $added++;
             }
-            $total = (int)($d['count'] ?? 0);
-            $done = $page * 100 >= $total || empty($d['products']);
-            set_setting('off_import_page', (string)($done ? 1 : $page + 1));
-            out(['page' => $page, 'pages' => max(1, (int)ceil($total / 100)), 'added' => $added, 'updated' => $updated, 'total' => $total, 'done' => $done,
-                 'catalogue' => (int)q('SELECT COUNT(*) FROM products')->fetchColumn()]);
+            gzclose($gz);
+            out(['from' => $from, 'next' => $line, 'added' => $added, 'updated' => $updated, 'skipped' => $skipped, 'done' => $done,
+                 'file_date' => date('Y-m-d', (int)filemtime($file)), 'catalogue' => (int)q('SELECT COUNT(*) FROM products')->fetchColumn()]);
 
         case 'admin.users':
             empty($user['is_admin']) && fail('Admins only', 403);
