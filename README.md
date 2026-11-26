@@ -275,3 +275,13 @@ When Open Food Facts has no grade for a product, the app works one out from the 
 - The category comes from the name, unit and aisle: drinks (sold by volume, incl. milk), water, cheese, red meat (protein capped), and fats/oils/nuts/seeds. Everything else uses the general table.
 - Fruit, vegetable and legume share comes from percentages in the ingredients ("tomatoes (34%)"); olive and avocado oil count as fruit.
 - The product page says why: "Why C: sugar +5, salt +3, protein −4…".
+
+## Scanning a label
+
+In the product editor, **Scan the label** reads a photo of the nutrition table (or the ingredients list) on the phone with Tesseract (open source, `assets/ocr`, licences in `assets/ocr/LICENSE.md`). Nothing is sent anywhere to read it, and it costs nothing.
+
+- The first scan downloads the reader once (about 8 MB, compressed by the server); after that it's on the phone.
+- It finds each row (energy, protein, carbohydrate, sugar, fat, saturated fat, fibre, sodium or salt) and takes the **per 100 g** column, whichever side it's on. kcal is converted to kJ, salt to sodium, and decimal commas and common misreads ("(g)" read as "(9)", O for 0) are fixed.
+- Filled numbers are highlighted until checked or edited, and the energy add-up check runs on them, which catches most misread decimals. Nothing is saved until you tap Save.
+- A photo of the ingredients list fills the ingredients from "Ingredients:" up to the allergens or storage text.
+- If `anthropic_key` is set in config.php, the server-side reader is used instead (paid, off by default).

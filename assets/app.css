@@ -589,3 +589,6 @@ input.center { text-align: center; }
 /* our own Nutri-Score (estimated from the label): dashed so it never passes for the official one */
 .ns.est { outline: 1.5px dashed currentColor; outline-offset: 1px; opacity: .92; }
 .ns-strip.est .ns.on { outline: 2px dashed var(--text); outline-offset: 2px; }
+
+/* numbers the label reader filled in: highlighted until checked or edited */
+input.filled, textarea.filled { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
