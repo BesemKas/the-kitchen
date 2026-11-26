@@ -36,8 +36,8 @@ rows = con.execute(f"""
 """).fetchall()
 
 
-def pick(texts, prefer=("main", "en")):
-    """A product's name or ingredients: the main language first, then English; skip ones with HTML in them."""
+def pick(texts, prefer=("en", "main")):
+    """A product's name or ingredients: English first, then the main language; skip ones with HTML in them."""
     if not texts:
         return None
     clean = [t for t in texts if t and t.get("text") and "<" not in t["text"]] or [t for t in texts if t and t.get("text")]
