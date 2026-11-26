@@ -2,13 +2,15 @@
 # cPanel Git Version Control → "Deploy HEAD Commit" runs these tasks.
 # Copies the app into public_html. Never touches app/config.php (it isn't in the repo),
 # and leaves setup.php out: it is only needed for a brand-new install.
+# data/ holds the South African product file (blocked from the web by data/.htaccess).
 # tools/ goes outside the web root, so the backup script can't be reached from a browser.
 deployment:
   tasks:
     - export DEPLOYPATH=/home1/tru645/public_html/
     - export TOOLSPATH=/home1/tru645/kitchen-tools/
-    - /bin/mkdir -p ${DEPLOYPATH}app ${DEPLOYPATH}assets ${TOOLSPATH}
+    - /bin/mkdir -p ${DEPLOYPATH}app ${DEPLOYPATH}assets ${DEPLOYPATH}data ${TOOLSPATH}
     - /bin/cp -f index.php api.php photo.php sw.js manifest.webmanifest .htaccess ${DEPLOYPATH}
     - /bin/cp -f app/bootstrap.php app/migrations.php app/schema.sql app/config.sample.php app/.htaccess ${DEPLOYPATH}app/
     - /bin/cp -Rf assets/. ${DEPLOYPATH}assets/
+    - /bin/cp -f data/off-za.jsonl.gz data/.htaccess ${DEPLOYPATH}data/
     - /bin/cp -f tools/backup.php ${TOOLSPATH}
