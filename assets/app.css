@@ -585,3 +585,7 @@ p.center { text-align: center; }
 .seg3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 input.center { text-align: center; }
 .buy-again .icon-btn { opacity: .6; }
+
+/* our own Nutri-Score (estimated from the label): dashed so it never passes for the official one */
+.ns.est { outline: 1.5px dashed currentColor; outline-offset: 1px; opacity: .92; }
+.ns-strip.est .ns.on { outline: 2px dashed var(--text); outline-offset: 2px; }

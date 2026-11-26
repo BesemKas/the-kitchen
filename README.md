@@ -266,3 +266,12 @@ Removing an item, *Remove ticked* and *Clear list* happen straight away. *Undo* 
 
 - **Buy again** (Shop) lists things that are low, plus things that ran out in the last three weeks or that you buy regularly. It shows five, up to twenty with *Show all*. ✕ hides one until you buy it again.
 - Tapping an at-home chip (Kitchen) or *At home* on a product opens a sheet: Plenty / Low / Out, or the exact number of packs. Every change has Undo, and anything that ran out in the last two weeks is under **Ran out lately** in the Kitchen.
+
+## Nutri-Score worked out from the label
+
+When Open Food Facts has no grade for a product, the app works one out from the label with the 2023 Nutri-Score algorithm (Santé publique France tables) and marks it **estimated** (dashed outline). Open Food Facts' own grade always wins, and ours is never stored or sent anywhere.
+
+- Needs per 100 g/ml: energy, sugar, saturated fat, sodium (converted to salt) and protein; fibre counts when given. When something's missing, the product page says which numbers to add.
+- The category comes from the name, unit and aisle: drinks (sold by volume, incl. milk), water, cheese, red meat (protein capped), and fats/oils/nuts/seeds. Everything else uses the general table.
+- Fruit, vegetable and legume share comes from percentages in the ingredients ("tomatoes (34%)"); olive and avocado oil count as fruit.
+- The product page says why: "Why C: sugar +5, salt +3, protein −4…".

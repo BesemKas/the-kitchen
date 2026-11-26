@@ -55,10 +55,119 @@ function proteinCost(p, price) {
 const proteinShare = (p) => (p.energy_kj > 0 && p.protein_g > 0 ? Math.min(1, (17 * p.protein_g) / p.energy_kj) : 0);
 const proteinLabel = (v) => (v === null ? '' : `${money(v)} per 10 g protein`);
 const NOVA = { 1: 'Unprocessed', 2: 'Cooking ingredient', 3: 'Processed', 4: 'Ultra-processed' };
+/* ----- Nutri-Score, worked out from the label (2023 algorithm, as published by Santé publique France).
+   Open Food Facts' own grade always wins; ours fills the gap and is marked as estimated. ----- */
+const NS_STEP = (v, limits, strict = true) => { let pts = 0; for (const l of limits) if (strict ? v > l : v >= l) pts++; return pts; };
+const NS_T = {
+  energy: [335, 670, 1005, 1340, 1675, 2010, 2345, 2680, 3015, 3350],
+  satfat: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  sugar: [3.4, 6.8, 10, 14, 17, 20, 24, 27, 31, 34, 37, 41, 44, 48, 51],
+  salt: [0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.2, 2.4, 2.6, 2.8, 3, 3.2, 3.4, 3.6, 3.8, 4],
+  protein: [2.4, 4.8, 7.2, 9.6, 12, 14, 17],
+  fibre: [3.0, 4.1, 5.2, 6.3, 7.4],
+  satEnergy: [120, 240, 360, 480, 600, 720, 840, 960, 1080, 1200],
+  bevEnergy: [30, 90, 150, 210, 240, 270, 300, 330, 360, 390],
+  bevSugar: [0.5, 2, 3.5, 5, 6, 7, 8, 9, 10, 11],
+  bevProtein: [1.2, 1.5, 1.8, 2.1, 2.4, 2.7, 3.0],
+};
+const FVL_WORDS = /\b(tomato|carrot|onion|pea|peas|bean|beans|lentil|chickpea|potato|pumpkin|butternut|spinach|cabbage|pepper|mushroom|corn|maize kernels|apple|orange|banana|mango|pineapple|grape|peach|pear|berry|berries|strawberr|apricot|guava|lemon|fruit|vegetable)/i;
+const SWEETENER_CODES = new Set(['e950', 'e951', 'e952', 'e954', 'e955', 'e957', 'e959', 'e960', 'e960a', 'e961', 'e962', 'e969']);
+/** Which Nutri-Score rules apply: from the aisle, the name and whether it's sold by volume. */
+function nsCategory(p) {
+  const n = `${p.name || ''} ${p.brand || ''}`.toLowerCase();
+  const byVolume = ['ml', 'l'].includes(p.unit);
+  const drinkWords = /\b(water|juice|cooldrink|cool drink|soda|cola|lemonade|iced tea|ice tea|drink|nectar|milk|maas|amasi|kefir|smoothie|energy|squash|cordial)\b/;
+  if (/\b(oil|margarine|ghee|lard|butter(?!milk| ?nut)|peanut butter|nuts?|almonds?|cashews?|peanuts?|walnuts?|macadamia|pecans?|seeds?)\b/.test(n) && !/\bbutternut\b/.test(n)) return 'fats';
+  if (byVolume && drinkWords.test(n) && !/\b(sauce|dressing|vinegar|syrup|yoghurt|yogurt)\b/.test(n)) {
+    if (/\b(still|sparkling|mineral|spring|table)?\s*water\b/.test(n) && !/\b(flavou?red|vitamin|tonic|coconut)\b/.test(n) && !(p.sugar_g > 0.5) && !(p.energy_kj > 20)) return 'water';
+    return 'beverage';
+  }
+  if (/\bchees/.test(n) && !/\b(curls|puffs|naks|snack)\b/.test(n)) return 'cheese';
+  if (/\b(beef|mince|lamb|mutton|pork|bacon|ham|boerewors|wors|biltong|salami|polony|vienna|venison)\b/.test(n)) return 'redmeat';
+  return 'general';
+}
+/** Fruit, vegetable and legume share, from percentages printed in the ingredients ("Tomatoes (34%)"). 0 when not stated. */
+function nsFvl(p) {
+  // oils pressed from a fruit count as fruit (olive, avocado); seed and nut oils don't
+  if (/\b(olive|avocado) oil\b/i.test(p.name || '')) return 100;
+  let pct = 0;
+  for (const part of String(p.ingredients || '').split(/[,;]/)) {
+    const m = part.match(/(\d+(?:[.,]\d+)?)\s*%/);
+    if (m && FVL_WORDS.test(part)) pct += parseFloat(m[1].replace(',', '.'));
+  }
+  return Math.min(100, pct);
+}
+/** Our Nutri-Score: { grade, score, category, parts: [[label, points]] } or { missing: [...] } when the label is incomplete. */
+function estimateNutriScore(p) {
+  const cat = nsCategory(p);
+  if (cat === 'water') return { grade: 'a', score: 0, category: cat, parts: [] };
+  const need = [['energy_kj', 'energy'], ['sugar_g', 'sugar'], ['satfat_g', 'saturated fat'], ['sodium_mg', 'sodium'], ['protein_g', 'protein']];
+  const missing = need.filter(([k]) => p[k] === null || p[k] === undefined || p[k] === '').map(([, l]) => l);
+  if (cat === 'fats' && (p.fat_g === null || p.fat_g === undefined)) missing.push('fat');
+  if (missing.length) return { missing, category: cat };
+  const v = (k) => Number(p[k]) || 0;
+  const salt = v('sodium_mg') * 2.5 / 1000;
+  const fibre = v('fibre_g');
+  const fvl = nsFvl(p);
+  const parts = [];
+  let N = 0; let P = 0;
+  const neg = (label, pts) => { N += pts; if (pts) parts.push([label, pts]); return pts; };
+  const pos = (label, pts) => { if (pts) parts.push([label, -pts]); return pts; };
+  if (cat === 'beverage') {
+    neg('Energy', NS_STEP(v('energy_kj'), NS_T.bevEnergy));
+    neg('Sugar', NS_STEP(v('sugar_g'), NS_T.bevSugar));
+    neg('Saturated fat', NS_STEP(v('satfat_g'), NS_T.satfat));
+    neg('Salt', NS_STEP(salt, NS_T.salt));
+    const codes = new Set((p.additives || []).map((c) => String(c).toLowerCase()));
+    for (const m of String(p.ingredients || '').matchAll(/\be\s?-?\s?(\d{3,4}[a-z]?)\b/gi)) codes.add(`e${m[1].toLowerCase()}`);
+    const sweet = [...codes].some((c) => SWEETENER_CODES.has(c)) || /\b(aspartame|sucralose|acesulfame|saccharin|cyclamate|stevi|steviol)\b/i.test(p.ingredients || '');
+    if (sweet) neg('Sweeteners', 4);
+    P += pos('Protein', NS_STEP(v('protein_g'), NS_T.bevProtein));
+    P += pos('Fibre', NS_STEP(fibre, NS_T.fibre));
+    P += pos('Fruit and veg', fvl > 80 ? 6 : fvl > 60 ? 4 : fvl > 40 ? 2 : 0);
+    const score = N - P;
+    return { grade: score <= 2 ? 'b' : score <= 6 ? 'c' : score <= 9 ? 'd' : 'e', score, category: cat, parts };
+  }
+  if (cat === 'fats') {
+    neg('Energy from saturated fat', NS_STEP(v('satfat_g') * 37, NS_T.satEnergy));
+    neg('Sugar', NS_STEP(v('sugar_g'), NS_T.sugar));
+    const ratio = v('fat_g') > 0 ? (v('satfat_g') / v('fat_g')) * 100 : 0;
+    neg('Share of saturated fat', [10, 16, 22, 28, 34, 40, 46, 52, 58, 64].filter((l) => ratio >= l).length);
+    neg('Salt', NS_STEP(salt, NS_T.salt));
+  } else {
+    neg('Energy', NS_STEP(v('energy_kj'), NS_T.energy));
+    neg('Sugar', NS_STEP(v('sugar_g'), NS_T.sugar));
+    neg('Saturated fat', NS_STEP(v('satfat_g'), NS_T.satfat));
+    neg('Salt', NS_STEP(salt, NS_T.salt));
+  }
+  let protein = NS_STEP(v('protein_g'), NS_T.protein);
+  if (cat === 'redmeat') protein = Math.min(protein, 2);
+  const fib = NS_STEP(fibre, NS_T.fibre);
+  const veg = fvl > 80 ? 5 : fvl > 60 ? 2 : fvl > 40 ? 1 : 0;
+  const proteinCounts = cat === 'cheese' || N < (cat === 'fats' ? 7 : 11);
+  if (proteinCounts) P += pos('Protein', protein);
+  P += pos('Fibre', fib);
+  P += pos('Fruit and veg', veg);
+  const score = N - P;
+  const grade = cat === 'fats'
+    ? (score <= -6 ? 'a' : score <= 2 ? 'b' : score <= 10 ? 'c' : score <= 18 ? 'd' : 'e')
+    : (score <= 0 ? 'a' : score <= 2 ? 'b' : score <= 10 ? 'c' : score <= 18 ? 'd' : 'e');
+  return { grade, score, category: cat, parts, proteinIgnored: !proteinCounts && protein > 0 };
+}
+const gradeOf = (x) => { const g = nsGrade(x); return g ? g.grade : null; };
+const nsBadge = (x, prefix = '') => { const g = nsGrade(x); return g ? `<span class="ns ns-${g.grade}${g.estimated ? ' est' : ''}"${g.estimated ? ' title="Estimated from the label"' : ''}>${prefix}${g.grade.toUpperCase()}</span>` : ''; };
+/** The grade to show: Open Food Facts' when it has one, otherwise ours. */
+function nsGrade(p) {
+  if (p.nutriscore) return { grade: p.nutriscore, estimated: false };
+  const e = estimateNutriScore(p);
+  return e.grade ? { grade: e.grade, estimated: true, est: e } : null;
+}
+
 /** Nutri-Score, NOVA and additive badges (only what's known). */
 function healthBadges(p, { long = false } = {}) {
   const out = [];
-  if (p.nutriscore) out.push(`<span class="ns ns-${p.nutriscore}" title="Nutri-Score ${p.nutriscore.toUpperCase()}">${p.nutriscore.toUpperCase()}</span>`);
+  const ns = nsGrade(p);
+  if (ns) out.push(`<span class="ns ns-${ns.grade}${ns.estimated ? ' est' : ''}" title="Nutri-Score ${ns.grade.toUpperCase()}${ns.estimated ? ', estimated from the label' : ''}">${ns.grade.toUpperCase()}</span>`);
   if (p.nova) out.push(`<span class="nova nova-${p.nova}" title="NOVA ${p.nova}: ${NOVA[p.nova]}">${long ? NOVA[p.nova] : `N${p.nova}`}</span>`);
   if (p.additives && p.additives.length) out.push(`<span class="tag">${p.additives.length} additive${p.additives.length === 1 ? '' : 's'}</span>`);
   return out.length ? `<span class="badges">${out.join('')}</span>` : '';
@@ -715,7 +824,7 @@ async function renderList() {
     return `<li class="${p.price === null && !it.checked ? 'noprice' : ''} ${al.length ? `has-alert ${levelClass(al[0])}` : ''}" data-id="${it.id}">
       <input type="checkbox" data-act="check" ${it.checked ? 'checked' : ''} aria-label="${esc(it.name)}">
       <div class="grow tap" data-act="${prod ? 'product' : 'price'}">
-        <div class="name">${esc(it.name)}${prod && prod.nutriscore ? ` <span class="ns mini ns-${prod.nutriscore}">${prod.nutriscore.toUpperCase()}</span>` : ''}${it.from_plan && !it.checked ? '<span class="tag">plan</span>' : ''}</div>
+        <div class="name">${esc(it.name)}${prod && nsGrade(prod) ? ` <span class="ns mini ns-${nsGrade(prod).grade}${nsGrade(prod).estimated ? ' est' : ''}">${nsGrade(prod).grade.toUpperCase()}</span>` : ''}${it.from_plan && !it.checked ? '<span class="tag">plan</span>' : ''}</div>
         ${sub.length ? `<div class="sub">${sub.join(' · ')}</div>` : ''}
       </div>
       <div class="item-right">
@@ -1669,7 +1778,7 @@ async function renderProducts() {
       if (v === null) return 1e9;
       return proteinShare(p) >= 0.2 ? v : 1e6 + v;
     }
-    if (mode === 'health') return (p.nutriscore ? p.nutriscore.charCodeAt(0) - 96 : 6) * 10 + (p.nova || 5);
+    if (mode === 'health') { const g = nsGrade(p); return (g ? g.grade.charCodeAt(0) - 96 : 6) * 10 + (p.nova || 5); }
     return 0;
   };
   const searchHtml = (term) => {
@@ -2067,17 +2176,23 @@ function trafficHtml(p) {
   }).join('')}</div>`;
 }
 
+const NS_CAT_LABEL = { general: '', cheese: 'scored as cheese', redmeat: 'scored as red meat', fats: 'scored as a fat, oil, nut or seed', beverage: 'scored as a drink', water: 'water' };
 function nutriScoreHtml(p) {
-  const strip = p.nutriscore
-    ? `<div class="ns-strip">${'abcde'.split('').map((g) => `<span class="ns ns-${g} ${g === p.nutriscore ? 'on' : ''}">${g.toUpperCase()}</span>`).join('')}</div>`
-    : '<div class="ns-strip unknown"><span>Not known yet</span><span class="small muted">Open Food Facts has no score for it</span></div>';
+  const ns = nsGrade(p);
+  const est = ns && ns.estimated ? ns.est : (!ns ? estimateNutriScore(p) : null);
+  const strip = ns
+    ? `<div class="ns-strip ${ns.estimated ? 'est' : ''}">${'abcde'.split('').map((g) => `<span class="ns ns-${g} ${g === ns.grade ? 'on' : ''}">${g.toUpperCase()}</span>`).join('')}</div>`
+    : `<div class="ns-strip unknown"><span>Not known yet</span><span class="small muted">${est && est.missing ? `Add ${est.missing.join(', ')} from the label to work it out` : 'Open Food Facts has no score for it'}</span></div>`;
+  const why = ns && ns.estimated && est.parts.length
+    ? `<p class="small muted">Why ${ns.grade.toUpperCase()}: ${est.parts.map(([l, v]) => `${l.toLowerCase()} ${v > 0 ? '+' : '−'}${Math.abs(v)}`).join(', ')}${est.proteinIgnored ? ' (protein doesn’t count when the bad points are this high)' : ''}.${NS_CAT_LABEL[est.category] ? ` ${NS_CAT_LABEL[est.category][0].toUpperCase()}${NS_CAT_LABEL[est.category].slice(1)}.` : ''}</p>`
+    : '';
   const nova = p.nova
     ? `<div class="row between"><b class="small">Processing</b><span class="small nova-${p.nova} strong">NOVA ${p.nova} · ${NOVA[p.nova]}</span></div>
        <div class="nova-bar">${[1, 2, 3, 4].map((n) => `<span class="${n === p.nova ? `on nova-${p.nova}` : ''}"></span>`).join('')}</div>`
     : '<div class="row between"><b class="small">Processing</b><span class="small muted">Not known yet</span></div>';
   return `<section class="card stack tight">
-    <div class="row between"><b>Nutri-Score</b><span class="small muted">${p.nutriscore ? 'Open Food Facts' : ''}</span></div>
-    ${strip}${trafficHtml(p)}${nova}</section>`;
+    <div class="row between"><b>Nutri-Score</b><span class="small muted">${p.nutriscore ? 'Open Food Facts' : ns ? 'Estimated from the label' : ''}</span></div>
+    ${strip}${why}${trafficHtml(p)}${nova}</section>`;
 }
 
 function nutritionTableHtml(p) {
@@ -2109,7 +2224,7 @@ function xrayText(p, a, { tag = 'button' } = {}) {
 function swapsFor(p, mode = 'protein') {
   const cat = (p.category || '').trim().toLowerCase();
   if (!cat) return [];
-  const nsRank = (x) => (x.nutriscore ? x.nutriscore.charCodeAt(0) : 120) * 10 + (x.nova || 5);
+  const nsRank = (x) => (gradeOf(x) ? gradeOf(x).charCodeAt(0) : 120) * 10 + (x.nova || 5);
   return S.products.filter((x) => x.id !== p.id && (x.category || '').trim().toLowerCase() === cat)
     .map((x) => { const pr = priceAt(x.prices, S.storeId); return { p: x, price: pr.price, pc: proteinCost(x, pr.price), a: analyseProduct(x) }; })
     .filter((c) => c.a.alerts.length === 0)
@@ -2122,7 +2237,7 @@ function bestSwap(p) {
   const mine = proteinCost(p, priceAt(p.prices, S.storeId).price);
   const list = swapsFor(p);
   const better = (c) => c.pc !== null && (mine === null || c.pc < mine - 0.01);
-  const healthier = (c) => (c.p.nutriscore || 'z') < (p.nutriscore || 'z');
+  const healthier = (c) => (gradeOf(c.p) || 'z') < (gradeOf(p) || 'z');
   return list.find(better) || list.find(healthier) || null;
 }
 /** What the swap does for the same protein as one pack of p. */
@@ -2138,7 +2253,7 @@ function swapCardHtml(p, c, { link = true } = {}) {
   const m = swapMaths(p, c);
   return `<${link ? 'button type="button" data-act="swaps"' : 'div'} class="card stack tight swap-card">
     <div class="row between"><span class="small muted caps">Swap from your products</span>${link ? '<span class="small accent">Compare ›</span>' : ''}</div>
-    <div class="row gap">${c.p.nutriscore ? `<span class="ns ns-${c.p.nutriscore}">${c.p.nutriscore.toUpperCase()}</span>` : ''}
+    <div class="row gap">${nsBadge(c.p)}
       <div class="grow"><b>${esc(c.p.name)}</b><div class="small muted">${[packLabel(c.p), c.price !== null ? money(c.price) : 'no price', 'no alerts'].filter(Boolean).join(' · ')}</div></div>
       ${c.pc !== null ? `<div class="right"><b class="accent">${money(c.pc)}</b><div class="small muted">per 10 g protein</div></div>` : ''}</div>
     ${m && m.saving > 0.5 ? `<div class="small">Same ${Math.round(m.protein)} g of protein as your ${esc(packLabel(p) || 'pack')}: <b class="accent">${money(m.cost)}</b> instead of ${money(m.price)}</div>` : ''}
@@ -2306,16 +2421,16 @@ function swapsSheet(p, back) {
         <button type="button" class="chip ${mode === 'health' ? 'active' : ''}" data-sort="health">Healthiest</button>
       </div>
       <section class="card stack tight"><span class="small muted">Now</span>
-        <div class="row gap">${p.nutriscore ? `<span class="ns ns-${p.nutriscore}">${p.nutriscore.toUpperCase()}</span>` : ''}<div class="grow"><b>${esc(p.name)}</b><div class="small ${a.alerts.length ? 'bad-text' : 'muted'}">${a.alerts.length ? `${a.alerts.length} alert${a.alerts.length === 1 ? '' : 's'}` : 'no alerts'}${p.nova ? ` · NOVA ${p.nova}` : ''} · ${pr.price !== null ? money(pr.price) : 'no price'}</div></div>
+        <div class="row gap">${nsBadge(p)}<div class="grow"><b>${esc(p.name)}</b><div class="small ${a.alerts.length ? 'bad-text' : 'muted'}">${a.alerts.length ? `${a.alerts.length} alert${a.alerts.length === 1 ? '' : 's'}` : 'no alerts'}${p.nova ? ` · NOVA ${p.nova}` : ''} · ${pr.price !== null ? money(pr.price) : 'no price'}</div></div>
         ${pc !== null ? `<div class="right"><b>${money(pc)}</b><div class="small muted">per 10 g protein</div></div>` : ''}</div></section>
       ${best ? `<section class="card stack tight best-swap"><div class="row between"><span class="small accent strong">BEST SWAP</span><span class="small muted">${best.price !== null ? money(best.price) : 'no price'}</span></div>
-        <div class="row gap">${best.p.nutriscore ? `<span class="ns ns-${best.p.nutriscore}">${best.p.nutriscore.toUpperCase()}</span>` : ''}<div class="grow"><b>${esc(best.p.name)}</b><div class="small muted">${[packLabel(best.p), 'no alerts', best.p.nova ? `NOVA ${best.p.nova}` : ''].filter(Boolean).join(' · ')}</div></div>
+        <div class="row gap">${nsBadge(best.p)}<div class="grow"><b>${esc(best.p.name)}</b><div class="small muted">${[packLabel(best.p), 'no alerts', best.p.nova ? `NOVA ${best.p.nova}` : ''].filter(Boolean).join(' · ')}</div></div>
         ${best.pc !== null ? `<div class="right"><b class="accent">${money(best.pc)}</b><div class="small muted">per 10 g protein</div></div>` : ''}</div>
         ${m ? `<div class="small stack tight"><div class="row between"><span class="muted">${Math.round(m.protein)} g protein (your ${esc(packLabel(p) || 'pack')})</span><span>${m.saving > 0 ? `<s class="muted">${money(m.price)}</s> ` : ''}<b class="accent">${money(m.cost)}</b></span></div>
           ${m.salt !== null && m.swapSalt !== null ? `<div class="row between"><span class="muted">Salt in that much</span><span><s class="muted">${fmtQty(round(m.salt, 1))} g</s> <b>${m.swapSalt < 1 ? 'under 1 g' : `${fmtQty(round(m.swapSalt, 1))} g`}</b></span></div>` : ''}</div>` : ''}
         <button type="button" class="btn primary block" data-swap="${best.p.id}">${onList ? 'Swap on my list' : 'Add to my list'}</button></section>`
         : `<p class="empty">${p.category ? 'No better option in this aisle yet. Scan a few alternatives next time you shop.' : 'Set an aisle on this product to see swaps.'}</p>`}
-      ${list.length > 1 ? `<ul class="list card flush">${list.slice(1, 6).map((c) => `<li><span class="ns ${c.p.nutriscore ? `ns-${c.p.nutriscore}` : 'ns-unknown'}">${c.p.nutriscore ? c.p.nutriscore.toUpperCase() : '?'}</span><div class="grow"><div class="name">${esc(c.p.name)}</div><div class="sub">${c.price !== null ? money(c.price) : 'no price'}${c.pc !== null ? ` · ${proteinLabel(c.pc)}` : ''}</div></div><button type="button" class="icon-btn add-btn" data-swap="${c.p.id}" aria-label="Use ${esc(c.p.name)} instead">⇄</button></li>`).join('')}</ul>` : ''}
+      ${list.length > 1 ? `<ul class="list card flush">${list.slice(1, 6).map((c) => `<li>${nsBadge(c.p) || '<span class="ns ns-unknown">?</span>'}<div class="grow"><div class="name">${esc(c.p.name)}</div><div class="sub">${c.price !== null ? money(c.price) : 'no price'}${c.pc !== null ? ` · ${proteinLabel(c.pc)}` : ''}</div></div><button type="button" class="icon-btn add-btn" data-swap="${c.p.id}" aria-label="Use ${esc(c.p.name)} instead">⇄</button></li>`).join('')}</ul>` : ''}
       ${back ? '<button type="button" class="btn block ghost" data-act="back">Back</button>' : ''}`);
     sheetBody.onclick = async (e) => {
       const s = e.target.closest('[data-sort]');
@@ -2345,7 +2460,7 @@ function scanAlertSheet(p) {
   openSheet(`<div class="sheet-head"><div class="row gap"><span class="alert-icon ${levelClass(first)}" aria-hidden="true">!</span><h2>${a.alerts.length === 1 ? `Contains ${esc(first.word ? first.name : first.label)}` : `${a.alerts.length} things before you buy`}</h2></div><button class="icon-btn" data-close aria-label="Close">✕</button></div>
     <p class="small muted">${esc(p.name)}${priceAt(p.prices, S.storeId).price !== null ? ` · ${money(priceAt(p.prices, S.storeId).price)}` : ''}</p>
     ${a.alerts.map((i) => `<div class="alert-banner static ${levelClass(i)}"><span class="grow">${esc(alertSentence(i))}${(S.alerts || {})[i.code] === 'always' ? '<span class="small muted block">You chose “Always alert me”. <button type="button" class="linklike" data-code="' + esc(i.code) + '">Change</button></span>' : ''}</span></div>`).join('')}
-    <div class="row wrap gap">${p.nutriscore ? `<span class="ns ns-${p.nutriscore}">Nutri-Score ${p.nutriscore.toUpperCase()}</span>` : ''}${p.nova ? `<span class="lv-tag nova-${p.nova}">NOVA ${p.nova}</span>` : ''}<button type="button" class="linklike" data-act="details">Full details ›</button></div>
+    <div class="row wrap gap">${nsBadge(p, 'Nutri-Score ')}${p.nova ? `<span class="lv-tag nova-${p.nova}">NOVA ${p.nova}</span>` : ''}<button type="button" class="linklike" data-act="details">Full details ›</button></div>
     ${nutritionTableHtml(p)}
     ${swap ? swapCardHtml(p, swap) : ''}
     <div class="grid2">${swap ? `<button class="btn primary" data-act="take" data-id="${swap.p.id}">Take the swap</button>` : ''}<button class="btn ${swap ? '' : 'primary'}" data-act="buy">Buy anyway</button></div>
